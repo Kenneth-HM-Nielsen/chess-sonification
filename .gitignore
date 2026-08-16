@@ -1,0 +1,14 @@
+# Source games, extracted features and rendered audio stay local.
+data/pgn/
+data/frames/
+out/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# macOS
+.DS_Store
