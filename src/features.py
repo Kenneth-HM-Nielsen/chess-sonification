@@ -50,16 +50,31 @@ ROLLING_WINDOW_MOVES = 12
 THINK_RELATIVE_CLAMP = 3.0
 
 
+def _move_count(board: chess.Board) -> int:
+    """Legal moves, discounting any that capture a king.
+
+    Behind a null move the side that has just given check can "capture" the
+    enemy king, which python-chess reports as legal. Left in, it would inflate
+    mobility by one on every checking ply -- a systematic error landing on
+    precisely the sharpest moves in the game.
+    """
+    return sum(
+        1
+        for move in board.legal_moves
+        if board.piece_type_at(move.to_square) != chess.KING
+    )
+
+
 def _mobility(board: chess.Board) -> tuple[int, int]:
     """Legal move count for White and Black in `board`.
 
     The side not to move is counted behind a null move, which python-chess
     permits even when the mover is in check. The board is restored afterwards.
     """
-    mover = board.legal_moves.count()
+    mover = _move_count(board)
     board.push(chess.Move.null())
     try:
-        waiter = board.legal_moves.count()
+        waiter = _move_count(board)
     finally:
         board.pop()
     return (mover, waiter) if board.turn == chess.WHITE else (waiter, mover)
@@ -199,12 +214,11 @@ def think_medians(frames: list[dict]) -> tuple[float | None, dict[str, float | N
     )
 
 
-def annotate(frames: list[dict], periods: list | None = None) -> list[dict]:
+def annotate(frames: list[dict]) -> list[dict]:
     """Append board, progress, time-pressure and think-shape features, in place."""
     if not frames:
         return frames
-    if periods is None:
-        periods = parse_time_control(frames[0].get("time_control"))
+    periods = parse_time_control(frames[0].get("time_control"))
     thresholds = period_thresholds(periods)
     opening_pace = initial_budget(periods)
 
@@ -218,7 +232,8 @@ def annotate(frames: list[dict], periods: list | None = None) -> list[dict]:
 
     # Repetition is a property of the move stack, not of a position in isolation,
     # so the board is carried forward and pushed rather than rebuilt from FENs.
-    board = chess.Board()
+    # The game does not always start from the standard position.
+    board = chess.Board(frames[0].get("start_fen") or chess.STARTING_FEN)
     carried: dict[str, tuple] = {"w": (None, None, None), "b": (None, None, None)}
     recent: dict[str, deque] = {
         "w": deque(maxlen=ROLLING_WINDOW_MOVES),
@@ -226,18 +241,16 @@ def annotate(frames: list[dict], periods: list | None = None) -> list[dict]:
     }
     since_pawn_move = 0
     since_capture = 0
-    desynced = False
 
     for frame in frames:
         move = chess.Move.from_uci(frame["uci"])
-        if not desynced and move not in board.legal_moves:
-            log.warning(
-                "ply %d (%s) is not legal in the reconstructed position; the game "
-                "may not start from the standard position",
-                frame["ply"],
-                frame["san"],
+        # Continuing past a desync would silently fabricate every board and
+        # progress feature for the rest of the game, so stop instead.
+        if move not in board.legal_moves:
+            raise ValueError(
+                f"ply {frame['ply']} ({frame['san']}) is not legal in the replayed "
+                f"position {board.fen()!r}; frames are inconsistent with start_fen"
             )
-            desynced = True
 
         frame.update(move_features(board, move))
         was_pawn_move = board.piece_type_at(move.from_square) == chess.PAWN
@@ -252,7 +265,6 @@ def annotate(frames: list[dict], periods: list | None = None) -> list[dict]:
             {
                 "halfmove_clock": board.halfmove_clock,
                 "repetition_2": board.is_repetition(2),
-                "repetition_3": board.is_repetition(3),
                 "plies_since_pawn_move": since_pawn_move,
                 "plies_since_capture": since_capture,
             }
@@ -264,10 +276,13 @@ def annotate(frames: list[dict], periods: list | None = None) -> list[dict]:
         if clock is None:
             carried[color] = (None, None, None)
         else:
-            remaining = moves_to_threshold(thresholds, move_number)
-            budget = clock / max(1, remaining) + increment_for_move(
-                periods, move_number
-            )
+            # On a boundary ply the clock reading already contains the new
+            # period's allocation, so the horizon has to be the new period too.
+            # Pairing a post-credit clock with the pre-credit horizon would read
+            # the whole fresh allocation as the budget for a single move.
+            horizon_move = move_number + 1 if frame["period_boundary"] else move_number
+            remaining = moves_to_threshold(thresholds, horizon_move)
+            budget = clock / remaining + increment_for_move(periods, horizon_move)
             carried[color] = (
                 remaining,
                 round(budget, 3),
@@ -284,13 +299,16 @@ def annotate(frames: list[dict], periods: list | None = None) -> list[dict]:
 
         frame["think_relative"] = None
         if frame["decision"]:
+            # Strictly trailing: the baseline is taken before this ply joins the
+            # window, so a long think is measured against what came before it
+            # rather than partly against itself.
             window = recent[color]
-            window.append(frame["think_time"])
             baseline = (
                 statistics.median(window)
                 if len(window) == window.maxlen
                 else player_median[color]
             )
+            window.append(frame["think_time"])
             if baseline:
                 ratio = math.log(frame["think_time"] / baseline)
                 frame["think_relative"] = round(

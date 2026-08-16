@@ -152,6 +152,7 @@ def ingest(pgn_path: Path) -> list[dict]:
 
     time_control = game.headers.get("TimeControl")
     periods = parse_time_control(time_control)
+    start_fen = game.board().fen()
     # Without a usable allocation there is no way to tell an instant reply from a
     # bulk credit, so unexplained clock rises are reported as unknown, not zero.
     allocation_known = any(base is not None for _moves, base, _inc in periods)
@@ -234,25 +235,18 @@ def ingest(pgn_path: Path) -> list[dict]:
                 "clock_remaining": clock,
                 "think_time": think_time,
                 "period_boundary": boundary,
-                # Carried on every frame so the record stays self-describing
-                # once it has been written out and reloaded from JSON.
+                # Carried on every frame so the record stays self-describing once
+                # it has been written out and reloaded from JSON. The starting
+                # position is needed to replay the game, and is not always the
+                # standard one.
                 "time_control": time_control,
+                "start_fen": start_fen,
                 "eval_cp": _eval_cp(node),
                 "fen_after": board.fen(),
             }
         )
 
     return frames
-
-
-def coverage(frames: list[dict]) -> dict:
-    """Count how many plies carry each optional signal."""
-    return {
-        "plies": len(frames),
-        "clock": sum(f["clock_remaining"] is not None for f in frames),
-        "think_time": sum(f["think_time"] is not None for f in frames),
-        "eval": sum(f["eval_cp"] is not None for f in frames),
-    }
 
 
 def write_frames(frames: list[dict], game_id: str, frames_dir: Path) -> Path:

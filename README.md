@@ -21,13 +21,22 @@ pitch (file to scale degree, rank to octave), and the player's think time picks
 the reverb tail, so a long think blooms and a snap recapture lands dry.
 
 **Structural level** is the part that makes the result non-arbitrary. Per ply, the
-board is measured for mobility, blocked and mutually-attacking pawns, pressure
-around each king, forcing sequences and material balance. Those measurements feed a
-stateful tension value in `[0, 1]` that is *carried across the game* rather than
-recomputed move by move. Tension drives harmony, note density and dynamics — and it
-only resolves on a real release event, such as a pawn break, a queen trade, a king
-reaching shelter, or the end of the game. It never resolves on a timer, which is
-what keeps a grinding position sounding grinding.
+board is measured for blocked and mutually-attacking pawns, pressure around each
+king, material balance, forcing sequences, and how long it has been since anything
+irreversible happened. Those measurements feed a stateful tension value in `[0, 1]`
+that is *carried across the game* rather than recomputed move by move, and it only
+resolves on a real release event — a pawn break, a queen trade, a king reaching
+shelter, a pawn move breaking a long grind, or the end of the game. It never
+resolves on a timer, which is what keeps a grinding position sounding grinding.
+
+Two things are deliberately kept out of that value. Mobility — the raw count of
+legal moves — turns out to be nearly blind to whether a position is closed, since
+a locked centre pushes play to the wings without reducing the move count; it
+drives note density instead. And time pressure is a property of the players rather
+than the position, measured as how far behind their own opening pace each side has
+fallen, so it stays comparable between a three-minute game and a seven-hour one. A
+dead-drawn endgame played in a time scramble is low tension and high pressure, and
+should sound like it.
 
 Where the PGN carries `[%eval]` annotations, evaluation volatility is folded in as
 an additional tension term. Where it does not, that term drops out and the
@@ -78,3 +87,12 @@ only; bring your own games.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Tests
+
+```bash
+python -m unittest discover -s tests -t .
+```
+
+The suite builds its own PGNs, so it runs on a fresh clone. Checks that need real
+games skip themselves when `data/pgn/` is empty.
