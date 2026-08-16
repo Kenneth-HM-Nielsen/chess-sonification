@@ -150,7 +150,8 @@ def ingest(pgn_path: Path) -> list[dict]:
     for err in game.errors:
         log.warning("%s: parser error: %s", pgn_path.name, err)
 
-    periods = parse_time_control(game.headers.get("TimeControl"))
+    time_control = game.headers.get("TimeControl")
+    periods = parse_time_control(time_control)
     # Without a usable allocation there is no way to tell an instant reply from a
     # bulk credit, so unexplained clock rises are reported as unknown, not zero.
     allocation_known = any(base is not None for _moves, base, _inc in periods)
@@ -233,6 +234,9 @@ def ingest(pgn_path: Path) -> list[dict]:
                 "clock_remaining": clock,
                 "think_time": think_time,
                 "period_boundary": boundary,
+                # Carried on every frame so the record stays self-describing
+                # once it has been written out and reloaded from JSON.
+                "time_control": time_control,
                 "eval_cp": _eval_cp(node),
                 "fen_after": board.fen(),
             }
