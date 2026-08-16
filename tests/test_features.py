@@ -62,12 +62,30 @@ class BoardFeatures(unittest.TestCase):
         board = chess.Board("4k3/8/8/8/8/8/4r3/4K3 w - - 0 1")
         self.assertGreater(features.board_features(board)["king_pressure_w"], 0)
 
-    def test_material_balance_is_white_pov(self):
+    def test_king_pressure_includes_the_king_square_itself(self):
+        # A knight on c2 attacks e1 and nothing adjacent to it, so the count is
+        # non-zero only if the king's own square is part of the zone.
+        board = chess.Board("4k3/8/8/8/8/8/2n5/4K3 w - - 0 1")
+        self.assertEqual(features.board_features(board)["king_pressure_w"], 1)
+
+    def test_material_balance_weights_every_piece_type(self):
         self.assertEqual(
             features.board_features(chess.Board())["material_balance"], 0
         )
-        board = chess.Board("4k3/8/8/8/8/8/8/3QK3 w - - 0 1")
-        self.assertEqual(features.board_features(board)["material_balance"], 9)
+        cases = {
+            "4k3/8/8/8/8/8/P7/4K3 w - - 0 1": 1,
+            "4k3/8/8/8/8/8/8/N3K3 w - - 0 1": 3,
+            "4k3/8/8/8/8/8/8/B3K3 w - - 0 1": 3,
+            "4k3/8/8/8/8/8/8/R3K3 w - - 0 1": 5,
+            "4k3/8/8/8/8/8/8/3QK3 w - - 0 1": 9,
+            "3qk3/8/8/8/8/8/8/4K3 w - - 0 1": -9,
+        }
+        for fen, expected in cases.items():
+            with self.subTest(fen=fen):
+                self.assertEqual(
+                    features.board_features(chess.Board(fen))["material_balance"],
+                    expected,
+                )
 
     def test_centre_occupancy_is_per_side(self):
         board = chess.Board("4k3/8/8/3p4/3P4/8/8/4K3 w - - 0 1")
@@ -123,6 +141,29 @@ class BoardFeatures(unittest.TestCase):
                 board = chess.Board(fen)
                 self.assertEqual(features._move_count(board),
                                  board.legal_moves.count())
+
+
+class MoveFeaturesReachTheFrames(unittest.TestCase):
+    """Testing move_features directly leaves its wiring into annotate uncovered."""
+
+    def test_forced_and_capture_arrive_on_the_annotated_frame(self):
+        # Rh7+ leaves Kxh7 as Black's only legal reply, and it is a capture.
+        fen = "7k/5K2/8/8/8/8/8/7R w - - 0 1"
+        frames = features.annotate(
+            ingest.ingest(write_pgn(build_pgn(["Rh7+", "Kxh7"], fen=fen)))
+        )
+        self.assertFalse(frames[0]["forced"])
+        self.assertFalse(frames[0]["is_capture"])
+        self.assertTrue(frames[1]["forced"])
+        self.assertTrue(frames[1]["is_capture"])
+
+    def test_promotion_arrives_on_the_annotated_frame(self):
+        fen = "7k/P7/8/8/8/5K2/8/8 w - - 0 1"
+        frames = features.annotate(
+            ingest.ingest(write_pgn(build_pgn(["a8=Q", "Kh7"], fen=fen)))
+        )
+        self.assertTrue(frames[0]["is_promotion"])
+        self.assertFalse(frames[1]["is_promotion"])
 
 
 class ProgressFeatures(unittest.TestCase):
@@ -269,6 +310,19 @@ class TimePressure(unittest.TestCase):
 
 
 class ThinkShape(unittest.TestCase):
+    def test_the_floor_itself_counts_as_a_decision(self):
+        """Spec says non-decision when think falls *below* the floor.
+
+        Pins both the constant and the comparison: at exactly 0.15 the ply is a
+        decision, one hundredth under it is not.
+        """
+        think = [0.0, 0.0, 0.15, 0.14]
+        clocks = clocks_from_think(think, start=600)
+        frames = annotated(sans=shuffle_moves(4), clocks=clocks, time_control="600")
+        self.assertAlmostEqual(frames[2]["think_time"], 0.15, places=3)
+        self.assertTrue(frames[2]["decision"])
+        self.assertFalse(frames[3]["decision"])
+
     def test_premove_floor_sits_between_these_two_think_times(self):
         """Pins the floor behaviourally, either side of 0.15s."""
         think = [0.0, 0.0, 0.14, 0.16, 0.16, 0.14]
@@ -302,6 +356,24 @@ class ThinkShape(unittest.TestCase):
                          round(statistics.median(decisions), 3))
         self.assertLess(frames[0]["game_tempo_scale"], statistics.mean(decisions))
 
+    def test_partial_window_falls_back_to_the_whole_game_median(self):
+        """Before the window fills, the baseline is the whole-game median.
+
+        A partial-window median would use only what has been seen so far. White's
+        decisions are 10, 1, 1, 1: the whole-game median is 1, so the second
+        decision reports log(1) = 0, where a partial window over [10] would give
+        log(1/10). The spec forbids leaving early moves unscaled, and forbids
+        this cheaper substitute.
+        """
+        think = [0.0, 0.0, 10.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+        clocks = clocks_from_think(think, start=600)
+        frames = annotated(sans=shuffle_moves(len(think)), clocks=clocks,
+                           time_control="600")
+        white = [f for f in frames if f["color"] == "w" and f["decision"]]
+        self.assertAlmostEqual(white[0]["think_relative"], round(math.log(10.0), 4),
+                               places=3)
+        self.assertAlmostEqual(white[1]["think_relative"], 0.0, places=3)
+
     def test_early_plies_are_scaled_by_the_whole_game_median(self):
         think = [0.0, 0.0, 4.0, 1.0, 1.0, 1.0]
         clocks = clocks_from_think(think, start=600)
@@ -321,8 +393,9 @@ class ThinkShape(unittest.TestCase):
         Built so the two conventions cannot agree: White's twelve preceding
         decisions are six 1s and six 100s, whose median is 50.5. Including the
         100s spike would push the median to 100 and report log(1) = 0, damping
-        exactly the outlier the measure exists to find. A shorter window would
-        see only 100s and do the same.
+        exactly the outlier the measure exists to find. The fixture is derived
+        from ROLLING_WINDOW_MOVES, so it pins the trailing behaviour but
+        deliberately not the window length, which no specification fixes.
         """
         window = features.ROLLING_WINDOW_MOVES
         half = window // 2
