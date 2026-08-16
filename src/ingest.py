@@ -4,6 +4,11 @@ Reads a PGN with python-chess built-ins, deriving clock and evaluation data from
 `[%clk]` / `[%eval]` annotations where the source provides them. Games with no
 clocks, no evals, or neither are all supported; missing data stays `None` rather
 than being guessed at.
+
+Multi-period classical time controls are handled per period, so the increment
+used for a think time is the one actually in force at that move, and the bulk
+time credited at a period boundary is subtracted back out instead of being read
+as a negative think time.
 """
 
 from __future__ import annotations
@@ -20,25 +25,105 @@ log = logging.getLogger(__name__)
 MATE_CP = 10000
 
 
-def parse_increment(time_control: str | None) -> int:
-    """Seconds of increment from a PGN TimeControl header.
+# (moves_in_period, base_seconds, increment). moves_in_period None means "to the
+# end of the game"; base_seconds None means the header gave no usable allocation.
+Period = tuple[int | None, int | None, int]
 
-    '600+5' -> 5, '600' -> 0, '-' or missing -> 0. Multi-period controls such as
-    '40/9000+30:1800+30' take the increment of the first period.
+UNKNOWN_PERIODS: list[Period] = [(None, None, 0)]
+
+
+def parse_time_control(time_control: str | None) -> list[Period]:
+    """Ordered periods from a PGN TimeControl header.
+
+    '40/7200:20/3600:900+30' -> [(40, 7200, 0), (20, 3600, 0), (None, 900, 30)]
+    '180+2'                  -> [(None, 180, 2)]
+    '600'                    -> [(None, 600, 0)]
+    '-' / '?' / '*180' / absent -> [(None, None, 0)]
     """
     if not time_control:
-        return 0
+        return list(UNKNOWN_PERIODS)
     tc = time_control.strip()
-    if tc in {"-", "?", ""}:
-        return 0
-    first_period = tc.split(":")[0]
-    if "+" not in first_period:
-        return 0
-    try:
-        return int(float(first_period.split("+", 1)[1]))
-    except ValueError:
-        log.warning("unparseable increment in TimeControl %r, assuming 0", time_control)
-        return 0
+    if tc in {"-", "?", ""} or tc.startswith("*"):
+        return list(UNKNOWN_PERIODS)
+
+    periods: list[Period] = []
+    for segment in tc.split(":"):
+        segment = segment.strip()
+        if not segment:
+            continue
+        moves: int | None = None
+        if "/" in segment:
+            moves_text, segment = segment.split("/", 1)
+            try:
+                moves = int(moves_text)
+            except ValueError:
+                log.warning("unparseable TimeControl %r, treating as unknown", time_control)
+                return list(UNKNOWN_PERIODS)
+        increment = 0
+        if "+" in segment:
+            segment, increment_text = segment.split("+", 1)
+            try:
+                increment = int(float(increment_text))
+            except ValueError:
+                log.warning("unparseable increment in TimeControl %r, assuming 0", time_control)
+        try:
+            base = int(float(segment))
+        except ValueError:
+            log.warning("unparseable TimeControl %r, treating as unknown", time_control)
+            return list(UNKNOWN_PERIODS)
+        periods.append((moves, base, increment))
+
+    return periods or list(UNKNOWN_PERIODS)
+
+
+def increment_for_move(periods: list[Period], move_number: int) -> int:
+    """Increment of the period that `move_number` falls in."""
+    first_move = 1
+    for moves, _base, increment in periods:
+        if moves is None or move_number < first_move + moves:
+            return increment
+        first_move += moves
+    return periods[-1][2]
+
+
+def period_thresholds(periods: list[Period]) -> list[int]:
+    """Move numbers whose completion credits the next period's allocation.
+
+    For '40/7200:20/3600:900+30' this is [40, 60]: a player who completes move 40
+    is credited the 60 minutes of the second period, and completing move 60 is
+    credited the 15 minutes of the third. The final period is open-ended and
+    credits nothing further, so it never contributes a threshold.
+    """
+    thresholds: list[int] = []
+    completed = 0
+    for moves, _base, _increment in periods[:-1]:
+        if moves is None:
+            break
+        completed += moves
+        thresholds.append(completed)
+    return thresholds
+
+
+def is_period_boundary(periods: list[Period], move_number: int) -> bool:
+    """True on the move whose completion credits a new period's time.
+
+    This is the move *at* the cumulative threshold rather than the one after it:
+    FIDE adds the next period's allocation when a player completes the period's
+    final move, and the `[%clk]` recorded for that move already includes it.
+    """
+    return move_number in period_thresholds(periods)
+
+
+def credited_base(periods: list[Period], move_number: int) -> int | None:
+    """Base seconds credited on completing `move_number`, if it is a boundary."""
+    completed = 0
+    for index, (moves, _base, _increment) in enumerate(periods[:-1]):
+        if moves is None:
+            break
+        completed += moves
+        if completed == move_number:
+            return periods[index + 1][1]
+    return None
 
 
 def _eval_cp(node: chess.pgn.ChildNode) -> int | None:
@@ -65,7 +150,10 @@ def ingest(pgn_path: Path) -> list[dict]:
     for err in game.errors:
         log.warning("%s: parser error: %s", pgn_path.name, err)
 
-    increment = parse_increment(game.headers.get("TimeControl"))
+    periods = parse_time_control(game.headers.get("TimeControl"))
+    # Without a usable allocation there is no way to tell an instant reply from a
+    # bulk credit, so unexplained clock rises are reported as unknown, not zero.
+    allocation_known = any(base is not None for _moves, base, _inc in periods)
     board = game.board()
     # Baseline clock per colour. Reset to None whenever a ply lacks a clock, so a
     # think time is never measured across a gap in the annotations.
@@ -78,13 +166,48 @@ def ingest(pgn_path: Path) -> list[dict]:
         moved = board.piece_at(move.from_square)
         san = board.san(move)
 
+        move_number = (ply + 1) // 2
+        increment = increment_for_move(periods, move_number)
+        boundary = is_period_boundary(periods, move_number)
+
         clock = node.clock()
         baseline = last_clock[color]
         if clock is None or baseline is None:
             think_time = None
+        elif boundary:
+            # The clock rises here: the new period's allocation has already been
+            # added to the reading. Subtract it back out rather than clamping,
+            # which would report 0 at the tensest moment of the time scramble.
+            base = credited_base(periods, move_number)
+            if base is None:
+                think_time = None
+            else:
+                think_time = baseline - (clock - base) + increment
+                if think_time < 0:
+                    log.warning(
+                        "%s ply %d (%s): boundary reconstruction gave %.1fs, "
+                        "reporting unknown",
+                        pgn_path.name,
+                        ply,
+                        san,
+                        think_time,
+                    )
+                    think_time = None
+                else:
+                    think_time = round(think_time, 3)
         else:
             think_time = baseline - clock + increment
-            if think_time < 0:
+            if think_time < 0 and not allocation_known:
+                log.warning(
+                    "%s ply %d (%s): clock rose by %.1fs with no TimeControl to "
+                    "explain it, reporting unknown",
+                    pgn_path.name,
+                    ply,
+                    san,
+                    -think_time,
+                )
+                think_time = None
+            elif think_time < 0:
                 log.warning(
                     "%s ply %d (%s): negative think time %.1fs, clamped to 0",
                     pgn_path.name,
@@ -93,7 +216,8 @@ def ingest(pgn_path: Path) -> list[dict]:
                     think_time,
                 )
                 think_time = 0.0
-            think_time = round(think_time, 3)
+            else:
+                think_time = round(think_time, 3)
         last_clock[color] = clock
 
         board.push(move)
@@ -108,6 +232,7 @@ def ingest(pgn_path: Path) -> list[dict]:
                 "to_sq": chess.square_name(move.to_square),
                 "clock_remaining": clock,
                 "think_time": think_time,
+                "period_boundary": boundary,
                 "eval_cp": _eval_cp(node),
                 "fen_after": board.fen(),
             }
