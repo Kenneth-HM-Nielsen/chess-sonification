@@ -43,9 +43,33 @@ CENTRE_SQUARES = (chess.D4, chess.D5, chess.E4, chess.E5)
 # fallen -- which makes bullet and classical comparable without flattening them.
 NOMINAL_HORIZON = 40
 
+# Floor for the open-ended horizon. Once a sudden-death game has run past the
+# nominal horizon there is no defined pace left to measure against, and the floor
+# makes pressure a function of the absolute clock -- the honest reading.
+MIN_HORIZON = 10
+
+# Plies a side's pressure survives without a fresh clock reading. Stale pressure
+# is worse than absent pressure: absence switches the layer off honestly, while
+# a value carried from twenty plies ago keeps it playing a lie.
+FORWARD_FILL_PLIES = 4
+
 # Below this, a reply was executed before the position arose. Not a fast
 # decision; not a decision at all. One constant, from human reaction time.
 PREMOVE_FLOOR_S = 0.15
+
+# How a ply's think time came about. A premove and a measurement artifact both
+# look instant, and must not sound alike: only a genuinely measured sub-floor
+# value is a premove.
+DECISION = "decision"
+PREMOVE = "premove"
+UNKNOWN = "unknown"
+
+
+def classify_think(think_time: float | None, clamped: bool) -> str:
+    """Whether a ply's think time is a decision, a premove, or unknown."""
+    if think_time is None or clamped:
+        return UNKNOWN
+    return PREMOVE if think_time < PREMOVE_FLOOR_S else DECISION
 
 # Think times are compared against a trailing median of this many of the same
 # player's own decisions.
@@ -176,7 +200,12 @@ def moves_to_threshold(thresholds: list[int], move_number: int) -> int:
     for threshold in thresholds:
         if threshold > move_number:
             return threshold - move_number
-    return NOMINAL_HORIZON
+    # Open-ended period: count down a nominal horizon from where the period
+    # began, so a player holding their opening pace reads a constant budget here
+    # exactly as they do inside a bounded period. Without the countdown the
+    # divisor is fixed and the axis measures move number rather than pressure.
+    period_start = thresholds[-1] if thresholds else 0
+    return max(NOMINAL_HORIZON - (move_number - period_start), MIN_HORIZON)
 
 
 def initial_budget(periods: list) -> float | None:
@@ -208,7 +237,7 @@ def think_medians(frames: list[dict]) -> tuple[float | None, dict[str, float | N
     """
     per_player: dict[str, list[float]] = {"w": [], "b": []}
     for frame in frames:
-        if frame["decision"]:
+        if frame["decision_state"] == DECISION:
             per_player[frame["color"]].append(frame["think_time"])
     combined = per_player["w"] + per_player["b"]
     return (
@@ -228,12 +257,10 @@ def annotate(frames: list[dict]) -> list[dict]:
     thresholds = period_thresholds(periods)
     opening_pace = initial_budget(periods)
 
-    # A ply is a decision only when it is known to have taken longer than human
-    # reaction time. Unknown think times are not decisions either; downstream can
-    # tell the two apart because a premove has a think time and a gap does not.
     for frame in frames:
-        think = frame["think_time"]
-        frame["decision"] = think is not None and think >= PREMOVE_FLOOR_S
+        frame["decision_state"] = classify_think(
+            frame["think_time"], frame.get("think_time_clamped", False)
+        )
     game_tempo_scale, player_median = think_medians(frames)
 
     # Repetition is a property of the move stack, not of a position in isolation,
@@ -245,8 +272,7 @@ def annotate(frames: list[dict]) -> list[dict]:
         "w": deque(maxlen=ROLLING_WINDOW_MOVES),
         "b": deque(maxlen=ROLLING_WINDOW_MOVES),
     }
-    since_pawn_move = 0
-    since_capture = 0
+    last_reading: dict[str, int | None] = {"w": None, "b": None}
 
     for frame in frames:
         move = chess.Move.from_uci(frame["uci"])
@@ -259,29 +285,22 @@ def annotate(frames: list[dict]) -> list[dict]:
             )
 
         frame.update(move_features(board, move))
-        was_pawn_move = board.piece_type_at(move.from_square) == chess.PAWN
-        was_capture = board.is_capture(move)
-
         board.push(move)
         frame.update(board_features(board))
-
-        since_pawn_move = 0 if was_pawn_move else since_pawn_move + 1
-        since_capture = 0 if was_capture else since_capture + 1
         frame.update(
             {
                 "halfmove_clock": board.halfmove_clock,
                 "repetition_2": board.is_repetition(2),
-                "plies_since_pawn_move": since_pawn_move,
-                "plies_since_capture": since_capture,
             }
         )
 
         color = frame["color"]
         move_no = move_number_for_ply(frame["ply"])
         clock = frame["clock_remaining"]
-        if clock is None:
-            carried[color] = (None, None, None)
-        else:
+        # A missing reading leaves the last good value in place rather than
+        # discarding it; how long it stays usable is decided below.
+        if clock is not None:
+            last_reading[color] = frame["ply"]
             # Everything here describes the state the move leaves behind, since
             # that is what the clock reading describes: the moves still to make,
             # and the increment that will be paid for them. On the control move
@@ -296,15 +315,21 @@ def annotate(frames: list[dict]) -> list[dict]:
             )
 
         # Pressure persists between a side's own moves, so each colour's last
-        # value is carried forward onto every intervening ply.
+        # value is carried forward onto every intervening ply -- but only so far.
+        # Past that the reading is too old to stand for the player's state, and
+        # absence is reported instead.
         for side in ("w", "b"):
-            remaining, budget, pressure = carried[side]
+            reading = last_reading[side]
+            if reading is None or frame["ply"] - reading > FORWARD_FILL_PLIES:
+                remaining, budget, pressure = (None, None, None)
+            else:
+                remaining, budget, pressure = carried[side]
             frame[f"moves_to_threshold_{side}"] = remaining
             frame[f"budget_{side}"] = budget
             frame[f"time_pressure_{side}"] = pressure
 
         frame["think_relative"] = None
-        if frame["decision"]:
+        if frame["decision_state"] == DECISION:
             # Strictly trailing: the baseline is taken before this ply joins the
             # window, so a long think is measured against what came before it
             # rather than partly against itself.

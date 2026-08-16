@@ -180,6 +180,7 @@ def ingest(pgn_path: Path) -> list[dict]:
 
         clock = node.clock()
         baseline = last_clock[color]
+        clamped = False
         if clock is None or baseline is None:
             think_time = None
         elif boundary:
@@ -205,7 +206,9 @@ def ingest(pgn_path: Path) -> list[dict]:
                     think_time = round(think_time, 3)
         else:
             think_time = baseline - clock + increment
-            if think_time < 0 and not allocation_known:
+            if think_time >= 0:
+                think_time = round(think_time, 3)
+            elif not allocation_known:
                 log.warning(
                     "%s ply %d (%s): clock rose by %.1fs with no TimeControl to "
                     "explain it, reporting unknown",
@@ -215,7 +218,7 @@ def ingest(pgn_path: Path) -> list[dict]:
                     -think_time,
                 )
                 think_time = None
-            elif think_time < 0:
+            else:
                 log.warning(
                     "%s ply %d (%s): negative think time %.1fs, clamped to 0",
                     pgn_path.name,
@@ -223,9 +226,11 @@ def ingest(pgn_path: Path) -> list[dict]:
                     san,
                     think_time,
                 )
+                # Rounding noise in the source, not an instant reply. Held at 0
+                # for continuity but flagged, so that a measurement artifact is
+                # never classified as a premove downstream.
                 think_time = 0.0
-            else:
-                think_time = round(think_time, 3)
+                clamped = True
         last_clock[color] = clock
 
         board.push(move)
@@ -240,6 +245,7 @@ def ingest(pgn_path: Path) -> list[dict]:
                 "to_sq": chess.square_name(move.to_square),
                 "clock_remaining": clock,
                 "think_time": think_time,
+                "think_time_clamped": clamped,
                 "period_boundary": boundary,
                 # Carried on every frame so the record stays self-describing once
                 # it has been written out and reloaded from JSON. The starting

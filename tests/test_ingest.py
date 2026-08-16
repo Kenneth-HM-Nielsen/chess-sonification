@@ -147,7 +147,7 @@ class FrameShape(unittest.TestCase):
         expected = {
             "ply", "san", "uci", "color", "piece", "from_sq", "to_sq",
             "clock_remaining", "think_time", "eval_cp", "fen_after",
-            "period_boundary", "time_control", "start_fen",
+            "period_boundary", "time_control", "start_fen", "think_time_clamped",
         }
         self.assertEqual(set(frames[0]), expected)
         self.assertEqual(frames[0]["color"], "w")

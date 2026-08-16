@@ -87,11 +87,14 @@ only; bring your own games.
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -t .
+python -m tests.run              # names anything it skipped
+python -m tests.run --strict     # a skipped test is a failure
 ```
 
-The suite builds its own PGNs, so it runs on a fresh clone. Checks that need real
-games skip themselves when `data/pgn/` is empty.
+The suite carries its own short PGNs in `tests/fixtures/`, so every invariant
+runs on a fresh clone. A few checks compare real historical games and skip when
+`data/pgn/` is empty; the runner names them rather than reporting a quiet green,
+and `--strict` turns a skip into a non-zero exit for CI.
 
 ## License
 

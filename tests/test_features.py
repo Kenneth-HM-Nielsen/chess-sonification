@@ -17,6 +17,15 @@ logging.getLogger("src.ingest").setLevel(logging.CRITICAL)
 
 WC_CONTROL = "40/7200:20/3600:900+30"
 FIXTURES = pathlib.Path("data/pgn")
+SYNTHETIC = pathlib.Path(__file__).parent / "fixtures"
+
+# Real games are optional; these are committed and always present.
+REAL_GAMES = ("karpov_kasparov_1991_kid.pgn", "kasparov_anand_1995_evans.pgn")
+MISSING_REAL = [name for name in REAL_GAMES if not (FIXTURES / name).exists()]
+
+
+def synthetic(name):
+    return features.annotate(ingest.ingest(SYNTHETIC / name))
 
 
 def annotated(**kwargs):
@@ -167,13 +176,17 @@ class MoveFeaturesReachTheFrames(unittest.TestCase):
 
 
 class ProgressFeatures(unittest.TestCase):
-    def test_counters_track_and_reset(self):
+    def test_halfmove_clock_tracks_and_resets(self):
         frames = annotated(sans=["Nf3", "Nf6", "e4", "d5", "exd5"])
-        self.assertEqual(frames[0]["plies_since_pawn_move"], 1)
-        self.assertEqual(frames[1]["plies_since_pawn_move"], 2)
-        self.assertEqual(frames[2]["plies_since_pawn_move"], 0)
-        self.assertEqual(frames[4]["plies_since_capture"], 0)
-        self.assertEqual(frames[4]["halfmove_clock"], 0)
+        self.assertEqual(frames[0]["halfmove_clock"], 1)
+        self.assertEqual(frames[1]["halfmove_clock"], 2)
+        self.assertEqual(frames[2]["halfmove_clock"], 0)   # pawn move
+        self.assertEqual(frames[4]["halfmove_clock"], 0)   # capture
+
+    def test_redundant_counters_were_removed(self):
+        frames = annotated(sans=shuffle_moves(4))
+        self.assertNotIn("plies_since_pawn_move", frames[0])
+        self.assertNotIn("plies_since_capture", frames[0])
 
     def test_halfmove_clock_climbs_when_nothing_irreversible_happens(self):
         frames = annotated(sans=shuffle_moves(8))
@@ -320,8 +333,8 @@ class ThinkShape(unittest.TestCase):
         clocks = clocks_from_think(think, start=600)
         frames = annotated(sans=shuffle_moves(4), clocks=clocks, time_control="600")
         self.assertAlmostEqual(frames[2]["think_time"], 0.15, places=3)
-        self.assertTrue(frames[2]["decision"])
-        self.assertFalse(frames[3]["decision"])
+        self.assertEqual(frames[2]["decision_state"], features.DECISION)
+        self.assertEqual(frames[3]["decision_state"], features.PREMOVE)
 
     def test_premove_floor_sits_between_these_two_think_times(self):
         """Pins the floor behaviourally, either side of 0.15s."""
@@ -330,9 +343,9 @@ class ThinkShape(unittest.TestCase):
         frames = annotated(sans=shuffle_moves(6), clocks=clocks, time_control="600")
         self.assertAlmostEqual(frames[2]["think_time"], 0.14, places=2)
         self.assertAlmostEqual(frames[3]["think_time"], 0.16, places=2)
-        self.assertFalse(frames[2]["decision"], "0.14s is below the floor")
+        self.assertEqual(frames[2]["decision_state"], features.PREMOVE)
         self.assertIsNone(frames[2]["think_relative"])
-        self.assertTrue(frames[3]["decision"], "0.16s is above the floor")
+        self.assertEqual(frames[3]["decision_state"], features.DECISION)
         self.assertIsNotNone(frames[3]["think_relative"])
 
     def test_premove_floor_is_not_tuned_per_time_control(self):
@@ -343,15 +356,15 @@ class ThinkShape(unittest.TestCase):
                 clocks = clocks_from_think(think, start=start, increment=increment)
                 frames = annotated(sans=shuffle_moves(4), clocks=clocks,
                                    time_control=control)
-                self.assertFalse(frames[2]["decision"])
-                self.assertTrue(frames[3]["decision"])
+                self.assertEqual(frames[2]["decision_state"], features.PREMOVE)
+                self.assertEqual(frames[3]["decision_state"], features.DECISION)
 
     def test_game_tempo_scale_is_the_median_not_the_mean(self):
         think = [0.0, 0.0] + [1.0] * 8 + [600.0, 1.0]
         clocks = clocks_from_think(think, start=7200)
         frames = annotated(sans=shuffle_moves(len(think)), clocks=clocks,
                            time_control="7200")
-        decisions = [f["think_time"] for f in frames if f["decision"]]
+        decisions = [f["think_time"] for f in frames if f["decision_state"] == features.DECISION]
         self.assertEqual(frames[0]["game_tempo_scale"],
                          round(statistics.median(decisions), 3))
         self.assertLess(frames[0]["game_tempo_scale"], statistics.mean(decisions))
@@ -369,7 +382,7 @@ class ThinkShape(unittest.TestCase):
         clocks = clocks_from_think(think, start=600)
         frames = annotated(sans=shuffle_moves(len(think)), clocks=clocks,
                            time_control="600")
-        white = [f for f in frames if f["color"] == "w" and f["decision"]]
+        white = [f for f in frames if f["color"] == "w" and f["decision_state"] == features.DECISION]
         self.assertAlmostEqual(white[0]["think_relative"], round(math.log(10.0), 4),
                                places=3)
         self.assertAlmostEqual(white[1]["think_relative"], 0.0, places=3)
@@ -378,9 +391,9 @@ class ThinkShape(unittest.TestCase):
         think = [0.0, 0.0, 4.0, 1.0, 1.0, 1.0]
         clocks = clocks_from_think(think, start=600)
         frames = annotated(sans=shuffle_moves(6), clocks=clocks, time_control="600")
-        white = [f for f in frames if f["color"] == "w" and f["decision"]]
+        white = [f for f in frames if f["color"] == "w" and f["decision_state"] == features.DECISION]
         median = statistics.median([f["think_time"] for f in frames
-                                    if f["color"] == "w" and f["decision"]])
+                                    if f["color"] == "w" and f["decision_state"] == features.DECISION])
         self.assertAlmostEqual(
             white[0]["think_relative"],
             round(math.log(white[0]["think_time"] / median), 4),
@@ -407,7 +420,7 @@ class ThinkShape(unittest.TestCase):
         frames = annotated(sans=shuffle_moves(len(think)), clocks=clocks,
                            time_control="100000")
 
-        white = [f for f in frames if f["color"] == "w" and f["decision"]]
+        white = [f for f in frames if f["color"] == "w" and f["decision_state"] == features.DECISION]
         self.assertEqual(len(white), window + 1)
         spike = white[-1]
         self.assertAlmostEqual(spike["think_time"], 100.0, places=2)
@@ -450,10 +463,115 @@ class ThinkShape(unittest.TestCase):
         self.assertTrue(all(f["think_relative"] is None for f in frames))
 
 
+class SyntheticFixtures(unittest.TestCase):
+    """Invariants, against committed games so they run on a fresh clone."""
+
+    def test_on_pace_player_reads_zero_pressure_in_a_bounded_period(self):
+        """The load-bearing definition: budget == initial_budget, pressure == 0."""
+        frames = synthetic("on_pace_bounded.pgn")
+        pace = features.initial_budget(ingest.parse_time_control(WC_CONTROL))
+        self.assertEqual(pace, 180.0)
+        for side in ("w", "b"):
+            budgets = {f[f"budget_{side}"] for f in frames
+                       if f[f"budget_{side}"] is not None}
+            pressures = {f[f"time_pressure_{side}"] for f in frames
+                         if f[f"time_pressure_{side}"] is not None}
+            self.assertEqual(budgets, {180.0}, side)
+            self.assertEqual(pressures, {0.0}, side)
+
+    def test_on_pace_player_reads_zero_pressure_in_sudden_death(self):
+        """Identical to the bounded case: the horizon must decrement here too.
+
+        With a fixed horizon the divisor never shrinks, so an on-pace player
+        drifts from 0 towards 1 across the game and the axis ends up measuring
+        move number rather than pressure.
+        """
+        frames = synthetic("on_pace_sudden_death.pgn")
+        pace = features.initial_budget(ingest.parse_time_control("600"))
+        self.assertEqual(pace, 15.0)
+        for side in ("w", "b"):
+            budgets = {f[f"budget_{side}"] for f in frames
+                       if f[f"budget_{side}"] is not None}
+            pressures = {f[f"time_pressure_{side}"] for f in frames
+                         if f[f"time_pressure_{side}"] is not None}
+            self.assertEqual(budgets, {15.0}, side)
+            self.assertEqual(pressures, {0.0}, side)
+
+    def test_horizon_floors_rather_than_reaching_zero(self):
+        for move in (1, 20, 30, 31, 80):
+            self.assertGreaterEqual(features.moves_to_threshold([], move),
+                                    features.MIN_HORIZON)
+        self.assertEqual(features.moves_to_threshold([], 1),
+                         features.NOMINAL_HORIZON - 1)
+
+    def test_both_controls_reconstruct_rather_than_clamp(self):
+        frames = synthetic("two_controls.pgn")
+        boundaries = [f for f in frames if f["period_boundary"] and f["color"] == "w"]
+        self.assertEqual([(f["ply"] + 1) // 2 for f in boundaries], [3, 5])
+        for frame in boundaries:
+            self.assertIsNotNone(frame["think_time"])
+            self.assertGreater(frame["think_time"], 0.0)
+
+    def test_pressure_stops_forward_filling_across_a_long_gap(self):
+        frames = synthetic("clock_gap.pgn")
+        by_ply = {f["ply"]: f for f in frames}
+        # White's last reading is ply 3; the fill survives four plies, not more.
+        self.assertIsNotNone(by_ply[7]["time_pressure_w"])
+        self.assertIsNone(by_ply[8]["time_pressure_w"])
+        self.assertIsNone(by_ply[9]["time_pressure_w"])
+        # A fresh reading revives it, and Black is unaffected throughout.
+        self.assertIsNotNone(by_ply[11]["time_pressure_w"])
+        self.assertTrue(all(f["time_pressure_b"] is not None
+                            for f in frames if f["ply"] > 1))
+
+    def test_premove_chain_is_classified_as_premoves(self):
+        frames = synthetic("premove_chain.pgn")
+        states = [f["decision_state"] for f in frames]
+        self.assertEqual(states.count(features.PREMOVE), 4)
+        self.assertIn(features.DECISION, states)
+
+    def test_boundary_reconstruction_fixture(self):
+        frames = synthetic("boundary_reconstruction.pgn")
+        boundary = frames[2]
+        self.assertTrue(boundary["period_boundary"])
+        self.assertAlmostEqual(boundary["think_time"], 30.0, places=3)
+
+
+class ClampedIsNotAPremove(unittest.TestCase):
+    """A measurement artifact must not be classified as player behaviour."""
+
+    def test_clamped_zero_reads_unknown(self):
+        # The clock rises by more than the increment: rounding noise in the
+        # source, not an instant reply.
+        clocks = [600, 600, 590, 700]
+        frames = annotated(sans=shuffle_moves(4), clocks=clocks,
+                           time_control="600+5")
+        clamped = frames[3]
+        self.assertTrue(clamped["think_time_clamped"])
+        self.assertEqual(clamped["think_time"], 0.0)
+        self.assertEqual(clamped["decision_state"], features.UNKNOWN)
+        self.assertIsNone(clamped["think_relative"])
+
+    def test_a_genuinely_measured_zero_is_a_premove(self):
+        clocks = [600, 600, 600, 595]
+        frames = annotated(sans=shuffle_moves(4), clocks=clocks, time_control="600")
+        self.assertFalse(frames[2]["think_time_clamped"])
+        self.assertEqual(frames[2]["think_time"], 0.0)
+        self.assertEqual(frames[2]["decision_state"], features.PREMOVE)
+
+    def test_clamped_plies_stay_out_of_the_medians(self):
+        clocks = [600, 600, 590, 700, 580, 690, 570, 680]
+        frames = annotated(sans=shuffle_moves(8), clocks=clocks,
+                           time_control="600+5")
+        decisions = [f["think_time"] for f in frames
+                     if f["decision_state"] == features.DECISION]
+        self.assertNotIn(0.0, decisions)
+
+
 @unittest.skipUnless(
-    (FIXTURES / "karpov_kasparov_1991_kid.pgn").exists()
-    and (FIXTURES / "kasparov_anand_1995_evans.pgn").exists(),
-    "local PGN fixtures not present (data/pgn is gitignored)",
+    not MISSING_REAL,
+    "real-game PGN fixtures absent from data/pgn (gitignored): "
+    + ", ".join(MISSING_REAL),
 )
 class Phase2DoneCriteria(unittest.TestCase):
     """The stated criterion: a closed King's Indian against an open gambit."""
