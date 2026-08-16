@@ -19,7 +19,7 @@ WC_CONTROL = "40/7200:20/3600:900+30"
 FIXTURES = pathlib.Path("data/pgn")
 SYNTHETIC = pathlib.Path(__file__).parent / "fixtures"
 
-# Real games are optional; these are committed and always present.
+# Real historical games, gitignored. Every invariant runs without them.
 REAL_GAMES = ("karpov_kasparov_1991_kid.pgn", "kasparov_anand_1995_evans.pgn")
 MISSING_REAL = [name for name in REAL_GAMES if not (FIXTURES / name).exists()]
 
@@ -497,12 +497,80 @@ class SyntheticFixtures(unittest.TestCase):
             self.assertEqual(budgets, {15.0}, side)
             self.assertEqual(pressures, {0.0}, side)
 
-    def test_horizon_floors_rather_than_reaching_zero(self):
-        for move in (1, 20, 30, 31, 80):
-            self.assertGreaterEqual(features.moves_to_threshold([], move),
-                                    features.MIN_HORIZON)
+    def test_horizon_floors_at_a_literal_ten(self):
+        """Asserted against a literal, not against the constant.
+
+        The floor is the budget's divisor, so a zero would divide by zero on any
+        long sudden-death game; comparing it to itself would not notice.
+        """
+        self.assertEqual(features.MIN_HORIZON, 10)
+        self.assertEqual(features.moves_to_threshold([], 39), 10)
+        self.assertEqual(features.moves_to_threshold([], 80), 10)
+        self.assertEqual(features.moves_to_threshold([], 500), 10)
         self.assertEqual(features.moves_to_threshold([], 1),
                          features.NOMINAL_HORIZON - 1)
+
+    def test_the_floor_takes_over_at_move_thirty_not_forty(self):
+        """Where the countdown meets the floor, stated as a fact not a comment."""
+        self.assertEqual(features.moves_to_threshold([], 29), 11)
+        self.assertEqual(features.moves_to_threshold([], 30), 10)
+        self.assertEqual(features.moves_to_threshold([], 31), 10)
+        # In a later period the same countdown restarts from the period's end.
+        bounds = ingest.period_bounds(ingest.parse_time_control(WC_CONTROL))
+        self.assertEqual(features.moves_to_threshold(bounds, 89), 11)
+        self.assertEqual(features.moves_to_threshold(bounds, 90), 10)
+
+    def test_the_floor_regime_is_survivable(self):
+        """A long sudden-death game must annotate past the floor without dividing
+        by zero, and keep producing bounded pressure."""
+        moves = 45
+        clocks = []
+        for n in range(1, moves + 1):
+            clocks += [max(600 - 12 * n, 1.0)] * 2
+        frames = annotated(sans=shuffle_moves(moves * 2), clocks=clocks,
+                           time_control="600")
+        values = [f["time_pressure_w"] for f in frames
+                  if f["time_pressure_w"] is not None]
+        # White has a reading from ply 1; only Black lacks one there.
+        self.assertEqual(len(values), moves * 2)
+        self.assertEqual(
+            len([f for f in frames if f["time_pressure_b"] is not None]),
+            moves * 2 - 1,
+        )
+        self.assertTrue(all(0.0 <= v <= 1.0 for v in values))
+        self.assertGreater(max(values), 0.5)
+
+    def test_a_bounded_final_period_still_bounds_the_horizon(self):
+        """'40/7200:20/3600' ends at move 60 without crediting anything there.
+
+        The bound is not a credit point, but it still limits how many moves the
+        clock has to cover, so it belongs to the horizon.
+        """
+        bounds = ingest.period_bounds(ingest.parse_time_control("40/7200:20/3600"))
+        credits = ingest.period_thresholds(
+            ingest.parse_time_control("40/7200:20/3600")
+        )
+        self.assertEqual(bounds, [40, 60])
+        self.assertEqual(credits, [40])
+        self.assertEqual(features.moves_to_threshold(bounds, 59), 1)
+        self.assertEqual(features.moves_to_threshold(bounds, 45), 15)
+
+    def test_annotate_uses_bounds_not_credit_points_for_the_horizon(self):
+        """End to end: the two lists differ only when the last period is bounded.
+
+        With '3/600:3/300' the game ends at move 6 and nothing is credited there,
+        so a horizon built from credit points alone would fall through to the
+        open-ended countdown and report tens of moves where one remains.
+        """
+        white = [580, 560, 840, 820, 800, 780]
+        black = [575, 555, 835, 815, 795, 775]
+        clocks = [c for pair in zip(white, black) for c in pair]
+        frames = annotated(sans=shuffle_moves(12), clocks=clocks,
+                           time_control="3/600:3/300")
+        by_move = {(f["ply"] + 1) // 2: f for f in frames if f["color"] == "w"}
+        self.assertEqual(by_move[4]["moves_to_threshold_w"], 2)
+        self.assertEqual(by_move[5]["moves_to_threshold_w"], 1)
+        self.assertAlmostEqual(by_move[5]["budget_w"], 800.0, places=3)
 
     def test_both_controls_reconstruct_rather_than_clamp(self):
         frames = synthetic("two_controls.pgn")

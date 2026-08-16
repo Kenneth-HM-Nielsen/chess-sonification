@@ -109,6 +109,24 @@ def period_thresholds(periods: list[Period]) -> list[int]:
     return [threshold for threshold, _base in credit_points(periods)]
 
 
+def period_bounds(periods: list[Period]) -> list[int]:
+    """Move numbers at which each bounded period ends.
+
+    Wider than `period_thresholds`: a final period may be bounded without
+    crediting anything after it, as in '40/7200:20/3600'. Such a bound still
+    limits how many moves a clock has to cover, so it belongs to the horizon even
+    though nothing is credited there.
+    """
+    bounds: list[int] = []
+    completed = 0
+    for moves, _base, _increment in periods:
+        if moves is None:
+            break
+        completed += moves
+        bounds.append(completed)
+    return bounds
+
+
 def credited_base(periods: list[Period], move_number: int) -> int | None:
     """Base seconds credited on completing `move_number`, if it is a boundary."""
     for threshold, base in credit_points(periods):

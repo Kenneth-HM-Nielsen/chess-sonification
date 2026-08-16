@@ -22,7 +22,7 @@ from .ingest import (
     increment_for_move,
     move_number_for_ply,
     parse_time_control,
-    period_thresholds,
+    period_bounds,
 )
 
 log = logging.getLogger(__name__)
@@ -43,9 +43,11 @@ CENTRE_SQUARES = (chess.D4, chess.D5, chess.E4, chess.E5)
 # fallen -- which makes bullet and classical comparable without flattening them.
 NOMINAL_HORIZON = 40
 
-# Floor for the open-ended horizon. Once a sudden-death game has run past the
-# nominal horizon there is no defined pace left to measure against, and the floor
-# makes pressure a function of the absolute clock -- the honest reading.
+# Floor for the open-ended horizon. It takes over once the countdown has run
+# NOMINAL_HORIZON - MIN_HORIZON moves into the period -- move 30 of a sudden-death
+# game, not move 40 -- and from there pressure becomes a function of the absolute
+# clock, because no defined pace remains to measure against. Must stay above zero:
+# it is the divisor of the budget.
 MIN_HORIZON = 10
 
 # Plies a side's pressure survives without a fresh clock reading. Stale pressure
@@ -65,18 +67,19 @@ PREMOVE = "premove"
 UNKNOWN = "unknown"
 
 
-def classify_think(think_time: float | None, clamped: bool) -> str:
-    """Whether a ply's think time is a decision, a premove, or unknown."""
-    if think_time is None or clamped:
-        return UNKNOWN
-    return PREMOVE if think_time < PREMOVE_FLOOR_S else DECISION
-
 # Think times are compared against a trailing median of this many of the same
 # player's own decisions.
 ROLLING_WINDOW_MOVES = 12
 
 # log-ratio clamp, so a single outlier cannot dominate the reverb mapping.
 THINK_RELATIVE_CLAMP = 3.0
+
+
+def classify_think(think_time: float | None, clamped: bool) -> str:
+    """Whether a ply's think time is a decision, a premove, or unknown."""
+    if think_time is None or clamped:
+        return UNKNOWN
+    return PREMOVE if think_time < PREMOVE_FLOOR_S else DECISION
 
 
 def _move_count(board: chess.Board) -> int:
@@ -188,7 +191,7 @@ def move_features(board_before: chess.Board, move: chess.Move) -> dict:
     }
 
 
-def moves_to_threshold(thresholds: list[int], move_number: int) -> int:
+def moves_to_threshold(bounds: list[int], move_number: int) -> int:
     """Moves this side must still make after completing `move_number`.
 
     A clock reading is taken after its move, so the horizon paired with it counts
@@ -197,14 +200,14 @@ def moves_to_threshold(thresholds: list[int], move_number: int) -> int:
     to the next one, which is what keeps a credited clock from being read as a
     single move's budget.
     """
-    for threshold in thresholds:
-        if threshold > move_number:
-            return threshold - move_number
+    for bound in bounds:
+        if bound > move_number:
+            return bound - move_number
     # Open-ended period: count down a nominal horizon from where the period
     # began, so a player holding their opening pace reads a constant budget here
     # exactly as they do inside a bounded period. Without the countdown the
     # divisor is fixed and the axis measures move number rather than pressure.
-    period_start = thresholds[-1] if thresholds else 0
+    period_start = bounds[-1] if bounds else 0
     return max(NOMINAL_HORIZON - (move_number - period_start), MIN_HORIZON)
 
 
@@ -254,7 +257,7 @@ def annotate(frames: list[dict]) -> list[dict]:
     if not frames:
         return frames
     periods = parse_time_control(frames[0].get("time_control"))
-    thresholds = period_thresholds(periods)
+    bounds = period_bounds(periods)
     opening_pace = initial_budget(periods)
 
     for frame in frames:
@@ -306,7 +309,7 @@ def annotate(frames: list[dict]) -> list[dict]:
             # and the increment that will be paid for them. On the control move
             # that means the new period on both counts, which is why the credited
             # clock is not mistaken for one move's budget.
-            remaining = moves_to_threshold(thresholds, move_no)
+            remaining = moves_to_threshold(bounds, move_no)
             budget = clock / remaining + increment_for_move(periods, move_no + 1)
             carried[color] = (
                 remaining,
