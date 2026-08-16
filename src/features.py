@@ -165,15 +165,17 @@ def move_features(board_before: chess.Board, move: chess.Move) -> dict:
 
 
 def moves_to_threshold(thresholds: list[int], move_number: int) -> int:
-    """Moves this side still has to make before the next period threshold.
+    """Moves this side must still make after completing `move_number`.
 
-    Counts the move about to be played, so with the control at move 40 and White
-    on move 39 the answer is 2. Without that the budget inflates just before the
-    control, deflating pressure exactly where it should be highest.
+    A clock reading is taken after its move, so the horizon paired with it counts
+    the moves still ahead: on move 39 with the control at 40, that is one. On the
+    control move itself the threshold has just been passed and the horizon runs
+    to the next one, which is what keeps a credited clock from being read as a
+    single move's budget.
     """
     for threshold in thresholds:
-        if threshold >= move_number:
-            return threshold - move_number + 1
+        if threshold > move_number:
+            return threshold - move_number
     return NOMINAL_HORIZON
 
 
@@ -280,13 +282,13 @@ def annotate(frames: list[dict]) -> list[dict]:
         if clock is None:
             carried[color] = (None, None, None)
         else:
-            # On a boundary ply the clock reading already contains the new
-            # period's allocation, so the horizon has to be the new period too.
-            # Pairing a post-credit clock with the pre-credit horizon would read
-            # the whole fresh allocation as the budget for a single move.
-            horizon_move = move_no + 1 if frame["period_boundary"] else move_no
-            remaining = moves_to_threshold(thresholds, horizon_move)
-            budget = clock / remaining + increment_for_move(periods, horizon_move)
+            # Everything here describes the state the move leaves behind, since
+            # that is what the clock reading describes: the moves still to make,
+            # and the increment that will be paid for them. On the control move
+            # that means the new period on both counts, which is why the credited
+            # clock is not mistaken for one move's budget.
+            remaining = moves_to_threshold(thresholds, move_no)
+            budget = clock / remaining + increment_for_move(periods, move_no + 1)
             carried[color] = (
                 remaining,
                 round(budget, 3),

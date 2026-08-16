@@ -13,12 +13,22 @@ SHUFFLE = ("Nf3", "Nf6", "Ng1", "Ng8")
 
 
 def clock_text(seconds: float) -> str:
-    """Seconds as a `[%clk]` value, keeping tenths only when they are present."""
-    hours, rest = divmod(seconds, 3600)
+    """Seconds as a `[%clk]` value, to hundredths.
+
+    Rounding is done first, in integer hundredths, so that a value such as 599.95
+    cannot be decomposed into an impossible '0:09:60.0' -- which python-chess
+    reads back as 600, silently destroying sub-second precision.
+    """
+    hundredths = int(round(seconds * 100))
+    whole, fraction = divmod(hundredths, 100)
+    hours, rest = divmod(whole, 3600)
     minutes, secs = divmod(rest, 60)
-    if abs(secs - round(secs)) < 1e-9:
-        return f"{int(hours)}:{int(minutes):02d}:{int(round(secs)):02d}"
-    return f"{int(hours)}:{int(minutes):02d}:{secs:04.1f}"
+    stem = f"{hours}:{minutes:02d}:{secs:02d}"
+    if fraction == 0:
+        return stem
+    if fraction % 10 == 0:
+        return f"{stem}.{fraction // 10}"
+    return f"{stem}.{fraction:02d}"
 
 
 def shuffle_moves(plies: int) -> list[str]:
