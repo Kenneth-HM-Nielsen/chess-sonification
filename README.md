@@ -84,10 +84,6 @@ annotation still render — they simply use the board-derived signal only.
 `data/pgn/`, `data/frames/` and `out/` are gitignored. This repository is code
 only; bring your own games.
 
-## License
-
-MIT — see [LICENSE](LICENSE).
-
 ## Tests
 
 ```bash
@@ -96,3 +92,7 @@ python -m unittest discover -s tests -t .
 
 The suite builds its own PGNs, so it runs on a fresh clone. Checks that need real
 games skip themselves when `data/pgn/` is empty.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

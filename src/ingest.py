@@ -86,22 +86,35 @@ def increment_for_move(periods: list[Period], move_number: int) -> int:
     return periods[-1][2]
 
 
-def period_thresholds(periods: list[Period]) -> list[int]:
-    """Move numbers whose completion credits the next period's allocation.
+def credit_points(periods: list[Period]) -> list[tuple[int, int | None]]:
+    """`(move_number, base_seconds_credited)` for each period transition.
 
-    For '40/7200:20/3600:900+30' this is [40, 60]: a player who completes move 40
-    is credited the 60 minutes of the second period, and completing move 60 is
-    credited the 15 minutes of the third. The final period is open-ended and
-    credits nothing further, so it never contributes a threshold.
+    For '40/7200:20/3600:900+30' this is [(40, 3600), (60, 900)]: a player who
+    completes move 40 is credited the 60 minutes of the second period, and
+    completing move 60 is credited the 15 minutes of the third. The final period
+    is open-ended and credits nothing further, so it contributes no point.
     """
-    thresholds: list[int] = []
+    points: list[tuple[int, int | None]] = []
     completed = 0
-    for moves, _base, _increment in periods[:-1]:
+    for index, (moves, _base, _increment) in enumerate(periods[:-1]):
         if moves is None:
             break
         completed += moves
-        thresholds.append(completed)
-    return thresholds
+        points.append((completed, periods[index + 1][1]))
+    return points
+
+
+def period_thresholds(periods: list[Period]) -> list[int]:
+    """Move numbers whose completion credits the next period's allocation."""
+    return [threshold for threshold, _base in credit_points(periods)]
+
+
+def credited_base(periods: list[Period], move_number: int) -> int | None:
+    """Base seconds credited on completing `move_number`, if it is a boundary."""
+    for threshold, base in credit_points(periods):
+        if threshold == move_number:
+            return base
+    return None
 
 
 def is_period_boundary(periods: list[Period], move_number: int) -> bool:
@@ -111,19 +124,12 @@ def is_period_boundary(periods: list[Period], move_number: int) -> bool:
     FIDE adds the next period's allocation when a player completes the period's
     final move, and the `[%clk]` recorded for that move already includes it.
     """
-    return move_number in period_thresholds(periods)
+    return credited_base(periods, move_number) is not None
 
 
-def credited_base(periods: list[Period], move_number: int) -> int | None:
-    """Base seconds credited on completing `move_number`, if it is a boundary."""
-    completed = 0
-    for index, (moves, _base, _increment) in enumerate(periods[:-1]):
-        if moves is None:
-            break
-        completed += moves
-        if completed == move_number:
-            return periods[index + 1][1]
-    return None
+def move_number_for_ply(ply: int) -> int:
+    """Full-move number a ply belongs to; plies 1 and 2 are both move 1."""
+    return (ply + 1) // 2
 
 
 def _eval_cp(node: chess.pgn.ChildNode) -> int | None:
@@ -168,9 +174,9 @@ def ingest(pgn_path: Path) -> list[dict]:
         moved = board.piece_at(move.from_square)
         san = board.san(move)
 
-        move_number = (ply + 1) // 2
-        increment = increment_for_move(periods, move_number)
-        boundary = is_period_boundary(periods, move_number)
+        move_no = move_number_for_ply(ply)
+        increment = increment_for_move(periods, move_no)
+        boundary = is_period_boundary(periods, move_no)
 
         clock = node.clock()
         baseline = last_clock[color]
@@ -180,7 +186,7 @@ def ingest(pgn_path: Path) -> list[dict]:
             # The clock rises here: the new period's allocation has already been
             # added to the reading. Subtract it back out rather than clamping,
             # which would report 0 at the tensest moment of the time scramble.
-            base = credited_base(periods, move_number)
+            base = credited_base(periods, move_no)
             if base is None:
                 think_time = None
             else:

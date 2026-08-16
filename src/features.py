@@ -18,7 +18,12 @@ from collections import deque
 
 import chess
 
-from .ingest import increment_for_move, parse_time_control, period_thresholds
+from .ingest import (
+    increment_for_move,
+    move_number_for_ply,
+    parse_time_control,
+    period_thresholds,
+)
 
 log = logging.getLogger(__name__)
 
@@ -152,11 +157,10 @@ def board_features(board: chess.Board) -> dict:
 
 def move_features(board_before: chess.Board, move: chess.Move) -> dict:
     """Measurements that need the move and the position it was played from."""
-    legal = list(board_before.legal_moves)
     return {
         "is_capture": board_before.is_capture(move),
         "is_promotion": move.promotion is not None,
-        "forced": len(legal) == 1,
+        "forced": board_before.legal_moves.count() == 1,
     }
 
 
@@ -271,7 +275,7 @@ def annotate(frames: list[dict]) -> list[dict]:
         )
 
         color = frame["color"]
-        move_number = (frame["ply"] + 1) // 2
+        move_no = move_number_for_ply(frame["ply"])
         clock = frame["clock_remaining"]
         if clock is None:
             carried[color] = (None, None, None)
@@ -280,7 +284,7 @@ def annotate(frames: list[dict]) -> list[dict]:
             # period's allocation, so the horizon has to be the new period too.
             # Pairing a post-credit clock with the pre-credit horizon would read
             # the whole fresh allocation as the budget for a single move.
-            horizon_move = move_number + 1 if frame["period_boundary"] else move_number
+            horizon_move = move_no + 1 if frame["period_boundary"] else move_no
             remaining = moves_to_threshold(thresholds, horizon_move)
             budget = clock / remaining + increment_for_move(periods, horizon_move)
             carried[color] = (
