@@ -12,6 +12,9 @@ leaves the caller's board unmodified.
 from __future__ import annotations
 
 import logging
+import math
+import statistics
+from collections import deque
 
 import chess
 
@@ -29,12 +32,22 @@ PIECE_VALUES = {
 
 CENTRE_SQUARES = (chess.D4, chess.D5, chess.E4, chess.E5)
 
-# Moves assumed remaining in an open-ended final period, where there is no
-# threshold left to divide the clock by.
-NOMINAL_FINAL_PERIOD_MOVES = 20
+# Moves assumed to lie ahead where no threshold bounds the period. Used for both
+# the opening allowance and the running budget, so pressure is zero at move one
+# by construction and measures how far behind that starting pace a player has
+# fallen -- which makes bullet and classical comparable without flattening them.
+NOMINAL_HORIZON = 40
 
-# Seconds per move at which time pressure reads as zero. 6s/move gives ~0.9.
-PRESSURE_SATURATION_S = 60.0
+# Below this, a reply was executed before the position arose. Not a fast
+# decision; not a decision at all. One constant, from human reaction time.
+PREMOVE_FLOOR_S = 0.15
+
+# Think times are compared against a trailing median of this many of the same
+# player's own decisions.
+ROLLING_WINDOW_MOVES = 12
+
+# log-ratio clamp, so a single outlier cannot dominate the reverb mapping.
+THINK_RELATIVE_CLAMP = 3.0
 
 
 def _mobility(board: chess.Board) -> tuple[int, int]:
@@ -133,35 +146,91 @@ def move_features(board_before: chess.Board, move: chess.Move) -> dict:
 
 
 def moves_to_threshold(thresholds: list[int], move_number: int) -> int:
-    """Moves this side still has before the next period threshold."""
+    """Moves this side still has to make before the next period threshold.
+
+    Counts the move about to be played, so with the control at move 40 and White
+    on move 39 the answer is 2. Without that the budget inflates just before the
+    control, deflating pressure exactly where it should be highest.
+    """
     for threshold in thresholds:
         if threshold >= move_number:
-            return threshold - move_number
-    return NOMINAL_FINAL_PERIOD_MOVES
+            return threshold - move_number + 1
+    return NOMINAL_HORIZON
 
 
-def time_pressure(budget: float) -> float:
-    """Seconds-per-move budget mapped to [0, 1], saturating."""
-    return round(1.0 - min(1.0, budget / PRESSURE_SATURATION_S), 4)
+def initial_budget(periods: list) -> float | None:
+    """Seconds per move a player starts the game with, increment included."""
+    moves, base, increment = periods[0]
+    if base is None:
+        return None
+    divisor = moves if moves is not None else NOMINAL_HORIZON
+    return base / max(1, divisor) + increment
+
+
+def time_pressure(budget: float, initial: float | None) -> float | None:
+    """Budget as a shortfall against the player's own opening pace, in [0, 1].
+
+    Relative rather than absolute: half your starting allowance reads 0.5 whether
+    that is ninety seconds or two.
+    """
+    if not initial or initial <= 0:
+        return None
+    return round(1.0 - min(1.0, budget / initial), 4)
+
+
+def think_medians(frames: list[dict]) -> tuple[float | None, dict[str, float | None]]:
+    """Whole-game median think time, overall and per player.
+
+    Median rather than mean throughout: think-time distributions are heavily
+    right-tailed and one long think would otherwise flatten everything else.
+    Premoves are excluded -- they are not thinking.
+    """
+    per_player: dict[str, list[float]] = {"w": [], "b": []}
+    for frame in frames:
+        if frame["decision"]:
+            per_player[frame["color"]].append(frame["think_time"])
+    combined = per_player["w"] + per_player["b"]
+    return (
+        round(statistics.median(combined), 3) if combined else None,
+        {
+            side: (statistics.median(values) if values else None)
+            for side, values in per_player.items()
+        },
+    )
 
 
 def annotate(frames: list[dict], periods: list | None = None) -> list[dict]:
-    """Append board and time-pressure features to each frame, in place."""
+    """Append board, progress, time-pressure and think-shape features, in place."""
     if not frames:
         return frames
     if periods is None:
         periods = parse_time_control(frames[0].get("time_control"))
     thresholds = period_thresholds(periods)
+    opening_pace = initial_budget(periods)
 
-    board_before = chess.Board()
-    # Pressure persists between a side's own moves, so the last computed value
-    # for each colour is carried forward onto every intervening ply.
+    # A ply is a decision only when it is known to have taken longer than human
+    # reaction time. Unknown think times are not decisions either; downstream can
+    # tell the two apart because a premove has a think time and a gap does not.
+    for frame in frames:
+        think = frame["think_time"]
+        frame["decision"] = think is not None and think >= PREMOVE_FLOOR_S
+    game_tempo_scale, player_median = think_medians(frames)
+
+    # Repetition is a property of the move stack, not of a position in isolation,
+    # so the board is carried forward and pushed rather than rebuilt from FENs.
+    board = chess.Board()
     carried: dict[str, tuple] = {"w": (None, None, None), "b": (None, None, None)}
+    recent: dict[str, deque] = {
+        "w": deque(maxlen=ROLLING_WINDOW_MOVES),
+        "b": deque(maxlen=ROLLING_WINDOW_MOVES),
+    }
+    since_pawn_move = 0
+    since_capture = 0
     desynced = False
 
     for frame in frames:
         move = chess.Move.from_uci(frame["uci"])
-        if not desynced and move not in board_before.legal_moves:
+        if not desynced and move not in board.legal_moves:
             log.warning(
                 "ply %d (%s) is not legal in the reconstructed position; the game "
                 "may not start from the standard position",
@@ -170,9 +239,24 @@ def annotate(frames: list[dict], periods: list | None = None) -> list[dict]:
             )
             desynced = True
 
-        frame.update(move_features(board_before, move))
-        board_after = chess.Board(frame["fen_after"])
-        frame.update(board_features(board_after))
+        frame.update(move_features(board, move))
+        was_pawn_move = board.piece_type_at(move.from_square) == chess.PAWN
+        was_capture = board.is_capture(move)
+
+        board.push(move)
+        frame.update(board_features(board))
+
+        since_pawn_move = 0 if was_pawn_move else since_pawn_move + 1
+        since_capture = 0 if was_capture else since_capture + 1
+        frame.update(
+            {
+                "halfmove_clock": board.halfmove_clock,
+                "repetition_2": board.is_repetition(2),
+                "repetition_3": board.is_repetition(3),
+                "plies_since_pawn_move": since_pawn_move,
+                "plies_since_capture": since_capture,
+            }
+        )
 
         color = frame["color"]
         move_number = (frame["ply"] + 1) // 2
@@ -184,14 +268,34 @@ def annotate(frames: list[dict], periods: list | None = None) -> list[dict]:
             budget = clock / max(1, remaining) + increment_for_move(
                 periods, move_number
             )
-            carried[color] = (remaining, round(budget, 3), time_pressure(budget))
+            carried[color] = (
+                remaining,
+                round(budget, 3),
+                time_pressure(budget, opening_pace),
+            )
 
+        # Pressure persists between a side's own moves, so each colour's last
+        # value is carried forward onto every intervening ply.
         for side in ("w", "b"):
             remaining, budget, pressure = carried[side]
             frame[f"moves_to_threshold_{side}"] = remaining
             frame[f"budget_{side}"] = budget
             frame[f"time_pressure_{side}"] = pressure
 
-        board_before = board_after
+        frame["think_relative"] = None
+        if frame["decision"]:
+            window = recent[color]
+            window.append(frame["think_time"])
+            baseline = (
+                statistics.median(window)
+                if len(window) == window.maxlen
+                else player_median[color]
+            )
+            if baseline:
+                ratio = math.log(frame["think_time"] / baseline)
+                frame["think_relative"] = round(
+                    max(-THINK_RELATIVE_CLAMP, min(THINK_RELATIVE_CLAMP, ratio)), 4
+                )
+        frame["game_tempo_scale"] = game_tempo_scale
 
     return frames
