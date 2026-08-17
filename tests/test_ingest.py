@@ -148,7 +148,7 @@ class FrameShape(unittest.TestCase):
             "ply", "san", "uci", "color", "piece", "from_sq", "to_sq",
             "clock_remaining", "think_time", "eval_cp", "fen_after",
             "period_boundary", "time_control", "start_fen", "think_time_clamped",
-            "result", "termination",
+            "result",
         }
         self.assertEqual(set(frames[0]), expected)
         self.assertEqual(frames[0]["color"], "w")
@@ -160,18 +160,9 @@ class FrameShape(unittest.TestCase):
         frames = ingest.ingest(write_pgn(build_pgn(["Rg7+", "Kf6"], fen=fen)))
         self.assertEqual(frames[0]["start_fen"], fen)
 
-    def test_result_and_termination_come_from_the_headers(self):
-        pgn = ('[Event "T"]\n[Result "0-1"]\n[Termination "Time forfeit"]\n\n'
-               "1. Nf3 Nf6 0-1\n")
-        frames = ingest.ingest(write_pgn(pgn))
-        self.assertEqual(frames[0]["result"], "0-1")
-        self.assertEqual(frames[0]["termination"], "Time forfeit")
-
-    def test_absent_termination_tag_is_none(self):
-        frames = ingest.ingest(write_pgn(build_pgn(shuffle_moves(2),
-                                                   result="1-0")))
-        self.assertEqual(frames[0]["result"], "1-0")
-        self.assertIsNone(frames[0]["termination"])
+    def test_result_comes_from_the_header(self):
+        pgn = '[Event "T"]\n[Result "0-1"]\n\n1. Nf3 Nf6 0-1\n'
+        self.assertEqual(ingest.ingest(write_pgn(pgn))[0]["result"], "0-1")
 
     def test_an_unrecognised_result_is_reported(self):
         pgn = '[Event "T"]\n[Result "1\u20130"]\n\n1. Nf3 Nf6 *\n'

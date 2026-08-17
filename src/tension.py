@@ -5,8 +5,12 @@ a property of the position: how locked the pawns are, how much heat is on the
 kings, how violently the evaluation is swinging, how long nothing irreversible
 has happened. Pressure is a property of the players, and passes straight through
 from the clock. Density is how much is going on. A dead-drawn endgame in a time
-scramble is low tension and high pressure; a sharp attack with both players at an
-hour is the reverse, and both have to be representable.
+scramble is low tension and high pressure, and both have to be representable.
+
+Tension measures unresolved accumulation, so a sharp attacking game reads *low*
+on it: a gambit resolves constantly, and every resolution is a discharge.
+Sharpness is not a tension reading -- it lives in density and meter, and looking
+for it here is looking on the wrong axis.
 
 Tension is carried across plies rather than recomputed at each one, and it comes
 down only when something on the board brings it down. There is no timer and no

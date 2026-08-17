@@ -97,13 +97,14 @@ if "eval" in terms:
     terms["eval"] = _clamp(terms["eval"] + frame[key] / 1000.0)
 ```
 
-Running it over every fixture catches it — but only if the fixtures reaching
-those branches are committed. The first attempt at this fix ran over the whole
-corpus and still caught nothing on a fresh clone, because every committed
-fixture was a knight shuffle: no captures, no evaluations, and after a later
-change no result either, so not one release branch was entered by anything in
-the repository. Assert the coverage itself, as `test_the_committed_corpus_
-reaches_every_release_branch` does, rather than trusting a file count.
+Assert that the committed corpus enters every branch the test claims to guard. A
+fixture count is a proxy, and proxies drift from the property: the first attempt
+at this fix ran over the whole corpus and still caught nothing on a fresh clone,
+because every committed fixture was a knight shuffle with no captures and no
+evaluations, and after a later change no result either — so not one release
+branch was entered by anything in the repository.
+`test_the_committed_corpus_reaches_every_release_branch` asserts the property
+directly.
 
 The related habit: when a mutation survives, the finding is usually not "add a
 test" but "the test you have never runs that line".
