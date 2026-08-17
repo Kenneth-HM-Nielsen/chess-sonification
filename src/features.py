@@ -37,17 +37,18 @@ PIECE_VALUES = {
 
 CENTRE_SQUARES = (chess.D4, chess.D5, chess.E4, chess.E5)
 
-# Moves assumed to lie ahead where no threshold bounds the period. Used for both
-# the opening allowance and the running budget, so pressure is zero at move one
-# by construction and measures how far behind that starting pace a player has
-# fallen -- which makes bullet and classical comparable without flattening them.
+# Moves assumed to lie ahead where the rules bound nothing: a prior on game
+# length, not a rule. It sets both the opening allowance and the running budget,
+# so pressure is zero at move one by construction and measures how far behind
+# that starting pace a player has fallen -- which is what makes bullet and
+# classical comparable without flattening them.
 NOMINAL_HORIZON = 40
 
-# Floor for the open-ended horizon. It takes over once the countdown has run
-# NOMINAL_HORIZON - MIN_HORIZON moves into the period -- move 30 of a sudden-death
-# game, not move 40 -- and from there pressure becomes a function of the absolute
-# clock, because no defined pace remains to measure against. Must stay above zero:
-# it is the divisor of the budget.
+# Floor for the counting-down horizon, which is only ever used in an open-ended
+# period with no increment. It takes over NOMINAL_HORIZON - MIN_HORIZON moves in
+# -- move 30 of a sudden-death game, not move 40 -- and from there pressure
+# becomes a function of the absolute clock, because no defined pace remains to
+# measure against. Must stay above zero: it is the divisor of the budget.
 MIN_HORIZON = 10
 
 # Plies a side's pressure survives without a fresh clock reading. Stale pressure
@@ -191,7 +192,7 @@ def move_features(board_before: chess.Board, move: chess.Move) -> dict:
     }
 
 
-def moves_to_threshold(bounds: list[int], move_number: int) -> int:
+def moves_to_threshold(periods: list, move_number: int) -> int:
     """Moves this side must still make after completing `move_number`.
 
     A clock reading is taken after its move, so the horizon paired with it counts
@@ -199,14 +200,24 @@ def moves_to_threshold(bounds: list[int], move_number: int) -> int:
     control move itself the threshold has just been passed and the horizon runs
     to the next one, which is what keeps a credited clock from being read as a
     single move's budget.
+
+    Whether an open-ended period counts down turns on the increment, because the
+    two situations are not alike. Without one, the clock has to cover every
+    remaining move: a finite demand on a depleting resource, so the horizon is a
+    real countdown. With one, the increment is a sustainable pace by itself and
+    the clock covers only the excess above it, so the situation is memoryless and
+    there is no endpoint to count towards. Counting down anyway would make
+    pressure fall on a flat clock, which is the move-number dependence this whole
+    horizon exists to avoid.
     """
+    bounds = period_bounds(periods)
     for bound in bounds:
         if bound > move_number:
             return bound - move_number
-    # Open-ended period: count down a nominal horizon from where the period
-    # began, so a player holding their opening pace reads a constant budget here
-    # exactly as they do inside a bounded period. Without the countdown the
-    # divisor is fixed and the axis measures move number rather than pressure.
+
+    if periods[-1][2] > 0:
+        # NOMINAL_HORIZON here is a prior on game length, not a rule.
+        return NOMINAL_HORIZON
     period_start = bounds[-1] if bounds else 0
     return max(NOMINAL_HORIZON - (move_number - period_start), MIN_HORIZON)
 
@@ -257,7 +268,6 @@ def annotate(frames: list[dict]) -> list[dict]:
     if not frames:
         return frames
     periods = parse_time_control(frames[0].get("time_control"))
-    bounds = period_bounds(periods)
     opening_pace = initial_budget(periods)
 
     for frame in frames:
@@ -309,7 +319,7 @@ def annotate(frames: list[dict]) -> list[dict]:
             # and the increment that will be paid for them. On the control move
             # that means the new period on both counts, which is why the credited
             # clock is not mistaken for one move's budget.
-            remaining = moves_to_threshold(bounds, move_no)
+            remaining = moves_to_threshold(periods, move_no)
             budget = clock / remaining + increment_for_move(periods, move_no + 1)
             carried[color] = (
                 remaining,

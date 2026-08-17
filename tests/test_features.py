@@ -16,6 +16,7 @@ from tests.helpers import build_pgn, clocks_from_think, shuffle_moves, write_pgn
 logging.getLogger("src.ingest").setLevel(logging.CRITICAL)
 
 WC_CONTROL = "40/7200:20/3600:900+30"
+SUDDEN = [(None, 600, 0)]
 FIXTURES = pathlib.Path("data/pgn")
 SYNTHETIC = pathlib.Path(__file__).parent / "fixtures"
 
@@ -235,13 +236,13 @@ class TimePressure(unittest.TestCase):
         self.assertIsNone(features.initial_budget(ingest.parse_time_control("-")))
 
     def test_moves_to_threshold_counts_the_moves_still_ahead(self):
-        thresholds = ingest.period_thresholds(ingest.parse_time_control(WC_CONTROL))
-        self.assertEqual(features.moves_to_threshold(thresholds, 38), 2)
-        self.assertEqual(features.moves_to_threshold(thresholds, 39), 1)
+        periods = ingest.parse_time_control(WC_CONTROL)
+        self.assertEqual(features.moves_to_threshold(periods, 38), 2)
+        self.assertEqual(features.moves_to_threshold(periods, 39), 1)
         # The control has just been passed, so the horizon runs to the next one.
-        self.assertEqual(features.moves_to_threshold(thresholds, 40), 20)
-        self.assertEqual(features.moves_to_threshold(thresholds, 41), 19)
-        self.assertEqual(features.moves_to_threshold(thresholds, 60),
+        self.assertEqual(features.moves_to_threshold(periods, 40), 20)
+        self.assertEqual(features.moves_to_threshold(periods, 41), 19)
+        self.assertEqual(features.moves_to_threshold(periods, 60),
                          features.NOMINAL_HORIZON)
 
     def test_horizon_decrements_by_one_every_move(self):
@@ -250,8 +251,8 @@ class TimePressure(unittest.TestCase):
         Pairing a post-credit clock with a pre-credit horizon made moves 40 and
         41 both report 20, understating every budget before a control.
         """
-        thresholds = ingest.period_thresholds(ingest.parse_time_control(WC_CONTROL))
-        horizons = [features.moves_to_threshold(thresholds, m) for m in range(1, 60)]
+        periods = ingest.parse_time_control(WC_CONTROL)
+        horizons = [features.moves_to_threshold(periods, m) for m in range(1, 60)]
         for earlier, later in zip(horizons, horizons[1:]):
             if earlier != features.NOMINAL_HORIZON:
                 self.assertEqual(later, earlier - 1 if earlier > 1 else 20)
@@ -497,6 +498,53 @@ class SyntheticFixtures(unittest.TestCase):
             self.assertEqual(budgets, {15.0}, side)
             self.assertEqual(pressures, {0.0}, side)
 
+    def test_on_pace_player_reads_zero_pressure_in_a_bounded_period_with_increment(self):
+        """A bounded period counts down whether or not it carries an increment.
+
+        Pacing at 180+30 on `40/7200+30` drains 180s a move, so the budget must
+        sit at the opening 210 throughout.
+        """
+        moves = 30
+        clocks = []
+        for n in range(1, moves + 1):
+            clocks += [7200 - 180 * n] * 2
+        frames = annotated(sans=shuffle_moves(moves * 2), clocks=clocks,
+                           time_control="40/7200+30")
+        pace = features.initial_budget(ingest.parse_time_control("40/7200+30"))
+        self.assertEqual(pace, 210.0)
+        budgets = {f["budget_w"] for f in frames if f["budget_w"] is not None}
+        pressures = {f["time_pressure_w"] for f in frames
+                     if f["time_pressure_w"] is not None}
+        self.assertEqual(budgets, {210.0})
+        self.assertEqual(pressures, {0.0})
+
+    def test_an_increment_period_does_not_count_down(self):
+        """With an increment the situation is memoryless: no endpoint to count to.
+
+        Counting down would make pressure fall on a flat clock, which is the
+        move-number dependence the horizon exists to avoid.
+        """
+        with_increment = ingest.parse_time_control("40/7200:20/3600:900+30")
+        horizons = {features.moves_to_threshold(with_increment, m)
+                    for m in range(61, 140)}
+        self.assertEqual(horizons, {features.NOMINAL_HORIZON})
+        # The same period without an increment does count down.
+        without = ingest.parse_time_control("40/7200:20/3600:900")
+        self.assertGreater(features.moves_to_threshold(without, 61),
+                           features.moves_to_threshold(without, 75))
+
+    def test_flat_clock_gives_flat_pressure_under_an_increment(self):
+        """Pressure must not move when only the move number does."""
+        moves = 24
+        clocks = []
+        for _ in range(1, moves + 1):
+            clocks += [300.0, 300.0]           # perfectly flat: pace == increment
+        frames = annotated(sans=shuffle_moves(moves * 2), clocks=clocks,
+                           time_control="900+30")
+        pressures = {f["time_pressure_w"] for f in frames
+                     if f["time_pressure_w"] is not None}
+        self.assertEqual(len(pressures), 1)
+
     def test_horizon_floors_at_a_literal_ten(self):
         """Asserted against a literal, not against the constant.
 
@@ -504,21 +552,22 @@ class SyntheticFixtures(unittest.TestCase):
         long sudden-death game; comparing it to itself would not notice.
         """
         self.assertEqual(features.MIN_HORIZON, 10)
-        self.assertEqual(features.moves_to_threshold([], 39), 10)
-        self.assertEqual(features.moves_to_threshold([], 80), 10)
-        self.assertEqual(features.moves_to_threshold([], 500), 10)
-        self.assertEqual(features.moves_to_threshold([], 1),
+        self.assertEqual(features.moves_to_threshold(SUDDEN, 39), 10)
+        self.assertEqual(features.moves_to_threshold(SUDDEN, 80), 10)
+        self.assertEqual(features.moves_to_threshold(SUDDEN, 500), 10)
+        self.assertEqual(features.moves_to_threshold(SUDDEN, 1),
                          features.NOMINAL_HORIZON - 1)
 
     def test_the_floor_takes_over_at_move_thirty_not_forty(self):
         """Where the countdown meets the floor, stated as a fact not a comment."""
-        self.assertEqual(features.moves_to_threshold([], 29), 11)
-        self.assertEqual(features.moves_to_threshold([], 30), 10)
-        self.assertEqual(features.moves_to_threshold([], 31), 10)
+        self.assertEqual(features.moves_to_threshold(SUDDEN, 29), 11)
+        self.assertEqual(features.moves_to_threshold(SUDDEN, 30), 10)
+        self.assertEqual(features.moves_to_threshold(SUDDEN, 31), 10)
         # In a later period the same countdown restarts from the period's end.
-        bounds = ingest.period_bounds(ingest.parse_time_control(WC_CONTROL))
-        self.assertEqual(features.moves_to_threshold(bounds, 89), 11)
-        self.assertEqual(features.moves_to_threshold(bounds, 90), 10)
+        # A later period counts down only when it has no increment.
+        no_inc = ingest.parse_time_control("40/7200:20/3600:900")
+        self.assertEqual(features.moves_to_threshold(no_inc, 89), 11)
+        self.assertEqual(features.moves_to_threshold(no_inc, 90), 10)
 
     def test_the_floor_regime_is_survivable(self):
         """A long sudden-death game must annotate past the floor without dividing
@@ -546,14 +595,11 @@ class SyntheticFixtures(unittest.TestCase):
         The bound is not a credit point, but it still limits how many moves the
         clock has to cover, so it belongs to the horizon.
         """
-        bounds = ingest.period_bounds(ingest.parse_time_control("40/7200:20/3600"))
-        credits = ingest.period_thresholds(
-            ingest.parse_time_control("40/7200:20/3600")
-        )
-        self.assertEqual(bounds, [40, 60])
-        self.assertEqual(credits, [40])
-        self.assertEqual(features.moves_to_threshold(bounds, 59), 1)
-        self.assertEqual(features.moves_to_threshold(bounds, 45), 15)
+        periods = ingest.parse_time_control("40/7200:20/3600")
+        self.assertEqual(ingest.period_bounds(periods), [40, 60])
+        self.assertEqual(ingest.period_thresholds(periods), [40])
+        self.assertEqual(features.moves_to_threshold(periods, 59), 1)
+        self.assertEqual(features.moves_to_threshold(periods, 45), 15)
 
     def test_annotate_uses_bounds_not_credit_points_for_the_horizon(self):
         """End to end: the two lists differ only when the last period is bounded.
