@@ -14,11 +14,16 @@ without being told which is which.
 The renderer reads two signal layers off the game.
 
 **Note level** decides what each individual move sounds like: the piece moved
-picks the timbre (each of the six piece types gets its own additive-synthesis
-harmonic spectrum and envelope — pawns are short plucks, queens are a full
-harmonic stack, kings are hollow odd harmonics), the destination square picks the
-pitch (file to scale degree, rank to octave), and the player's think time picks
-the reverb tail, so a long think blooms and a snap recapture lands dry.
+picks the timbre, each of the six piece types aimed at an instrument family
+rather than at an abstract spectrum, the destination square picks the pitch (file
+to scale degree, rank to octave), and the player's think time picks the reverb
+tail, so a long think blooms and a snap recapture lands dry. Every sound is
+synthesised from numpy arrays — no sample libraries and no SoundFonts, which is
+what would keep a browser port viable.
+
+The palette is under construction: the first attempt at it was additive sine
+stacks and sounded like additive sine stacks, and it has been deleted rather than
+kept around.
 
 **Structural level** is the part that makes the result non-arbitrary. Per ply, the
 board is measured for blocked and mutually-attacking pawns, pressure around each
@@ -70,7 +75,7 @@ python -m src.cli frames data/pgn/game.pgn    # extract per-ply features to data
 python -m src.cli plot data/frames/game.json  # plot the tension track to out/
 ```
 
-Output is 44.1 kHz mono. A 40-move game renders to roughly two to four minutes of
+Output is 44.1 kHz stereo. A 40-move game renders to roughly two to four minutes of
 audio regardless of the game's actual time control, because note onsets come from
 the density track rather than from elapsed clock time.
 
