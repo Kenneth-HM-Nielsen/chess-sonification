@@ -66,10 +66,16 @@ FORWARD_FILL_PLIES = 4
 # decision; not a decision at all. One constant, from human reaction time.
 PREMOVE_FLOOR_S = 0.15
 
-# How a ply's think time came about. A premove and a measurement artifact both
-# look instant, and must not sound alike: only a genuinely measured sub-floor
-# value is a premove.
-DECISION = "decision"
+# How a ply's think time came about, reported on every frame as `decision_state`.
+# A premove and a measurement artifact both look instant, and must not sound
+# alike: only a genuinely measured sub-floor value is a premove.
+#
+# Three values, and the naming matters. `DECIDED` was `DECISION = "decision"`
+# while the field was still boolean, and a reader meeting a bare `decision` on a
+# three-valued field reads it as the yes half of a yes/no -- which is exactly the
+# conflation the third value exists to remove. Adjective, not noun, so the three
+# read as alternatives.
+DECIDED = "decided"
 PREMOVE = "premove"
 UNKNOWN = "unknown"
 
@@ -86,7 +92,7 @@ def classify_think(think_time: float | None, clamped: bool) -> str:
     """Whether a ply's think time is a decision, a premove, or unknown."""
     if think_time is None or clamped:
         return UNKNOWN
-    return PREMOVE if think_time < PREMOVE_FLOOR_S else DECISION
+    return PREMOVE if think_time < PREMOVE_FLOOR_S else DECIDED
 
 
 def _move_count(board: chess.Board) -> int:
@@ -311,7 +317,7 @@ def think_medians(frames: list[dict]) -> tuple[float | None, dict[str, float | N
     """
     per_player: dict[str, list[float]] = {"w": [], "b": []}
     for frame in frames:
-        if frame["decision_state"] == DECISION:
+        if frame["decision_state"] == DECIDED:
             per_player[frame["color"]].append(frame["think_time"])
     combined = per_player["w"] + per_player["b"]
     return (
@@ -402,7 +408,7 @@ def annotate(frames: list[dict]) -> list[dict]:
             frame[f"time_pressure_{side}"] = pressure
 
         frame["think_relative"] = None
-        if frame["decision_state"] == DECISION:
+        if frame["decision_state"] == DECIDED:
             # Strictly trailing: the baseline is taken before this ply joins the
             # window, so a long think is measured against what came before it
             # rather than partly against itself.

@@ -126,8 +126,9 @@ a fresh opinion.
 - **Absence is information.** `None` inputs switch their layer off. Never
   substitute a neutral default.
 - **A premove is not a fast decision, and a clamped value is neither.**
-  `decision_state` is three-valued. The constants are `features.DECISION`
-  (`"decision"`), `features.PREMOVE`, `features.UNKNOWN`.
+  `decision_state` is three-valued. The constants are `features.DECIDED`
+  (`"decided"`), `features.PREMOVE`, `features.UNKNOWN`. No `decision` anywhere:
+  the boolean-era noun read as the yes half of a yes/no on a three-valued field.
 
 ---
 

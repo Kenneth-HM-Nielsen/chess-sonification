@@ -367,6 +367,23 @@ class TimePressure(unittest.TestCase):
 
 
 class ThinkShape(unittest.TestCase):
+    def test_the_decision_states_are_spelled_as_frames_carry_them(self):
+        """Pinned to literals, because these strings leave the process.
+
+        Every other assertion here compares a frame against the same constant
+        the code wrote into it, which holds for any spelling including the
+        boolean-era `"decision"`. Frames are written to JSON and read back, and
+        the renderer gates reverb on these exact values, so the spelling is part
+        of the contract and not an implementation detail.
+        """
+        self.assertEqual(
+            (features.DECIDED, features.PREMOVE, features.UNKNOWN),
+            ("decided", "premove", "unknown"),
+        )
+        frames = annotated(sans=shuffle_moves(2))
+        self.assertIn("decision_state", frames[0])
+        self.assertNotIn("decision", frames[0])
+
     def test_the_floor_itself_counts_as_a_decision(self):
         """Spec says non-decision when think falls *below* the floor.
 
@@ -377,7 +394,7 @@ class ThinkShape(unittest.TestCase):
         clocks = clocks_from_think(think, start=600)
         frames = annotated(sans=shuffle_moves(4), clocks=clocks, time_control="600")
         self.assertAlmostEqual(frames[2]["think_time"], 0.15, places=3)
-        self.assertEqual(frames[2]["decision_state"], features.DECISION)
+        self.assertEqual(frames[2]["decision_state"], features.DECIDED)
         self.assertEqual(frames[3]["decision_state"], features.PREMOVE)
 
     def test_premove_floor_sits_between_these_two_think_times(self):
@@ -389,7 +406,7 @@ class ThinkShape(unittest.TestCase):
         self.assertAlmostEqual(frames[3]["think_time"], 0.16, places=2)
         self.assertEqual(frames[2]["decision_state"], features.PREMOVE)
         self.assertIsNone(frames[2]["think_relative"])
-        self.assertEqual(frames[3]["decision_state"], features.DECISION)
+        self.assertEqual(frames[3]["decision_state"], features.DECIDED)
         self.assertIsNotNone(frames[3]["think_relative"])
 
     def test_premove_floor_is_not_tuned_per_time_control(self):
@@ -401,14 +418,14 @@ class ThinkShape(unittest.TestCase):
                 frames = annotated(sans=shuffle_moves(4), clocks=clocks,
                                    time_control=control)
                 self.assertEqual(frames[2]["decision_state"], features.PREMOVE)
-                self.assertEqual(frames[3]["decision_state"], features.DECISION)
+                self.assertEqual(frames[3]["decision_state"], features.DECIDED)
 
     def test_game_tempo_scale_is_the_median_not_the_mean(self):
         think = [0.0, 0.0] + [1.0] * 8 + [600.0, 1.0]
         clocks = clocks_from_think(think, start=7200)
         frames = annotated(sans=shuffle_moves(len(think)), clocks=clocks,
                            time_control="7200")
-        decisions = [f["think_time"] for f in frames if f["decision_state"] == features.DECISION]
+        decisions = [f["think_time"] for f in frames if f["decision_state"] == features.DECIDED]
         self.assertEqual(frames[0]["game_tempo_scale"],
                          round(statistics.median(decisions), 3))
         self.assertLess(frames[0]["game_tempo_scale"], statistics.mean(decisions))
@@ -426,7 +443,7 @@ class ThinkShape(unittest.TestCase):
         clocks = clocks_from_think(think, start=600)
         frames = annotated(sans=shuffle_moves(len(think)), clocks=clocks,
                            time_control="600")
-        white = [f for f in frames if f["color"] == "w" and f["decision_state"] == features.DECISION]
+        white = [f for f in frames if f["color"] == "w" and f["decision_state"] == features.DECIDED]
         self.assertAlmostEqual(white[0]["think_relative"], round(math.log(10.0), 4),
                                places=3)
         self.assertAlmostEqual(white[1]["think_relative"], 0.0, places=3)
@@ -435,9 +452,9 @@ class ThinkShape(unittest.TestCase):
         think = [0.0, 0.0, 4.0, 1.0, 1.0, 1.0]
         clocks = clocks_from_think(think, start=600)
         frames = annotated(sans=shuffle_moves(6), clocks=clocks, time_control="600")
-        white = [f for f in frames if f["color"] == "w" and f["decision_state"] == features.DECISION]
+        white = [f for f in frames if f["color"] == "w" and f["decision_state"] == features.DECIDED]
         median = statistics.median([f["think_time"] for f in frames
-                                    if f["color"] == "w" and f["decision_state"] == features.DECISION])
+                                    if f["color"] == "w" and f["decision_state"] == features.DECIDED])
         self.assertAlmostEqual(
             white[0]["think_relative"],
             round(math.log(white[0]["think_time"] / median), 4),
@@ -464,7 +481,7 @@ class ThinkShape(unittest.TestCase):
         frames = annotated(sans=shuffle_moves(len(think)), clocks=clocks,
                            time_control="100000")
 
-        white = [f for f in frames if f["color"] == "w" and f["decision_state"] == features.DECISION]
+        white = [f for f in frames if f["color"] == "w" and f["decision_state"] == features.DECIDED]
         self.assertEqual(len(white), window + 1)
         spike = white[-1]
         self.assertAlmostEqual(spike["think_time"], 100.0, places=2)
@@ -700,7 +717,7 @@ class SyntheticFixtures(unittest.TestCase):
         frames = synthetic("premove_chain.pgn")
         states = [f["decision_state"] for f in frames]
         self.assertEqual(states.count(features.PREMOVE), 4)
-        self.assertIn(features.DECISION, states)
+        self.assertIn(features.DECIDED, states)
 
     def test_boundary_reconstruction_fixture(self):
         frames = synthetic("boundary_reconstruction.pgn")
@@ -736,7 +753,7 @@ class ClampedIsNotAPremove(unittest.TestCase):
         frames = annotated(sans=shuffle_moves(8), clocks=clocks,
                            time_control="600+5")
         decisions = [f["think_time"] for f in frames
-                     if f["decision_state"] == features.DECISION]
+                     if f["decision_state"] == features.DECIDED]
         self.assertNotIn(0.0, decisions)
 
 
