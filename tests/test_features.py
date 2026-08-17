@@ -153,6 +153,49 @@ class BoardFeatures(unittest.TestCase):
                                  board.legal_moves.count())
 
 
+class HangingMaterial(unittest.TestCase):
+    """The fifth tension source: the transient half of tactical volatility."""
+
+    def test_nothing_is_loose_when_nothing_is_attacked(self):
+        self.assertEqual(features._hanging_material(chess.Board()), 0)
+
+    def test_an_adequately_defended_piece_is_not_loose(self):
+        """Reaches the comparison with both halves false, which the starting
+        position never does -- there, no piece is attacked at all."""
+        # Nd4 attacked once by Nf5 and defended once by the c3 pawn. Equal
+        # numbers, and the cheapest attacker is worth the same as the piece.
+        board = chess.Board("4k3/8/8/5n2/3N4/2P5/8/4K3 w - - 0 1")
+        self.assertEqual(features._hanging_material(board), 3)   # only Nf5
+
+    def test_an_equal_valued_attacker_does_not_make_a_piece_loose(self):
+        """`cheapest < value`, not `<=`: a knight taken by a knight is a trade."""
+        board = chess.Board("4k3/8/8/5n2/3N4/2P5/8/4K3 w - - 0 1")
+        self.assertEqual(features._hanging_material(board), 3)
+        self.assertEqual(features.PIECE_VALUES[chess.KNIGHT], 3)
+
+    def test_both_colours_are_summed(self):
+        """A loose white rook, a loose black rook and a loose white knight."""
+        board = chess.Board("r3k1r1/8/8/8/8/8/8/R3K1N1 w - - 0 1")
+        self.assertEqual(features._hanging_material(board), 13)
+
+    def test_an_undefended_attacked_piece_is_loose(self):
+        # Knight on g1 attacked down the file by the rook, defended by nobody.
+        board = chess.Board("4k1r1/8/8/8/8/8/8/4K1N1 w - - 0 1")
+        self.assertEqual(features._hanging_material(board), 3)
+
+    def test_a_cheaper_attacker_makes_a_defended_piece_loose(self):
+        # Rook on d5 attacked by the c6 pawn and defended by the d1 rook: still
+        # loose, because the pawn is worth less than what it attacks.
+        board = chess.Board("4k3/8/2p5/3R4/8/8/8/3RK3 w - - 0 1")
+        self.assertEqual(features._hanging_material(board), 5)
+
+    def test_a_king_attacker_is_never_the_cheap_one(self):
+        # Queen attacked only by the enemy king and defended once: a king can
+        # capture but can never be traded, so it is not the cheap attacker.
+        board = chess.Board("8/8/3k4/3Q4/8/8/8/3RK3 b - - 0 1")
+        self.assertEqual(features._hanging_material(board), 0)
+
+
 class MoveFeaturesReachTheFrames(unittest.TestCase):
     """Testing move_features directly leaves its wiring into annotate uncovered."""
 

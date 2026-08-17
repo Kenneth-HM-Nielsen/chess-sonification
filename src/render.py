@@ -14,6 +14,10 @@ from __future__ import annotations
 SAMPLE_RATE = 44100
 
 
-def render(frames: list[dict], track: list[dict], out_path) -> None:
-    """Render frames plus their tension track to a 44.1 kHz mono WAV."""
+def render(frames: list[dict], track: dict, out_path) -> None:
+    """Render frames plus their state track to a 44.1 kHz mono WAV.
+
+    `track` is the two-scope record from `tension.tension_track`:
+    per-game fields alongside a `plies` list.
+    """
     raise NotImplementedError("Phase 4")

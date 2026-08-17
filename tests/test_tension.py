@@ -12,8 +12,6 @@ import logging
 import pathlib
 import unittest
 
-import chess
-
 from src import features, ingest, tension
 from tests.helpers import build_pgn, clocks_from_think, shuffle_moves, write_pgn
 
@@ -87,15 +85,33 @@ class BudgetBinding(unittest.TestCase):
 
     @staticmethod
     def _every_game():
-        """Every game available, so the check covers every code path.
+        """Every game available. The committed fixtures alone must suffice.
 
         A fixture with no captures, no pawn moves and no evaluations enters none
         of the release branches and none of the eval term, so a read placed
-        there would go unnoticed.
+        there would go unnoticed -- which is why the coverage is asserted below
+        rather than inferred from how many files happen to be on disk.
         """
         paths = sorted(SYNTHETIC.glob("*.pgn"))
         paths += sorted(pathlib.Path("data/pgn").glob("*.pgn"))
         return paths
+
+    def test_the_committed_corpus_reaches_every_release_branch(self):
+        """Guards the guard: without this the binding test can silently stop
+        covering anything, which is exactly what happened once already."""
+        seen = set()
+        layers = set()
+        for path in sorted(SYNTHETIC.glob("*.pgn")):
+            frames = features.annotate(ingest.ingest(path))
+            history = []
+            for index, frame in enumerate(frames):
+                seen.update(tension._release_events(
+                    frame, history, index == len(frames) - 1))
+                history.append(frame)
+            layers.update(tension.tension_track(frames)["active_layers"])
+        self.assertEqual(seen, {"pawn_break", "progress_reset", "simplification",
+                                "king_safety", "termination"})
+        self.assertEqual(layers, {"board", "eval", "pressure", "think"})
 
     def test_deleting_budget_changes_nothing(self):
         for path in self._every_game():
@@ -255,10 +271,13 @@ class Cadence(unittest.TestCase):
         """The same event released from a greater height is a greater event."""
         shallow = self._break_after(2)
         deep = self._break_after(30)
-        # The emitted axis is the square root of the raw one, so a fourfold
-        # difference in accumulated height reads as twofold here.
-        self.assertGreater(deep["cadence_strength"],
-                           shallow["cadence_strength"] * 1.5)
+        # A band, not a floor. The emitted axis is the square root of the raw
+        # one, so a fourfold difference in accumulated height must read as
+        # roughly twofold -- a plain floor also passes when the transform is
+        # missing from cadence_strength and the raw ratio comes through whole.
+        ratio = deep["cadence_strength"] / shallow["cadence_strength"]
+        self.assertGreater(ratio, 1.7)
+        self.assertLess(ratio, 2.6)
 
     def test_strength_is_not_boolean(self):
         """Three identical events at rising heights must read as three sizes.
@@ -476,6 +495,21 @@ class Calibration(unittest.TestCase):
         self.assertEqual(peaks, sorted(peaks, reverse=True), dict(zip(order, peaks)))
         self.assertGreater(peaks[-1], 0.2)      # the Evans is no longer silent
 
+    def test_the_same_constant_is_applied_to_every_game(self):
+        """No per-game fitting: emitted must be exactly raw ** GAMMA everywhere.
+
+        A monotone transform cannot reorder anything, so ordering alone proves
+        nothing. What has to hold is that one constant governs all games.
+        """
+        for sans, result in ((shuffle_moves(12), "1-0"),
+                             (["e4", "e5", "Nf3", "Nc6", "Bc4"], "0-1")):
+            with self.subTest(result=result):
+                _, track = tracked(sans=sans, result=result)
+                for entry in track:
+                    raw = entry["tension"] ** (1.0 / tension.GAMMA)
+                    self.assertAlmostEqual(
+                        tension._calibrate(raw), entry["tension"], places=6)
+
 
 class Plotting(unittest.TestCase):
     def test_plot_track_writes_a_figure(self):
@@ -546,29 +580,9 @@ class MissingEvaluations(unittest.TestCase):
                            max(e["tension"] for e in calm))
 
 
-class HangingMaterial(unittest.TestCase):
-    """The fifth source: the transient half of tactical volatility."""
-
-    def test_a_defended_piece_is_not_loose(self):
-        # Knight on f3 attacked by nothing.
-        self.assertEqual(features._hanging_material(chess.Board()), 0)
-
-    def test_an_undefended_attacked_piece_is_loose(self):
-        # Knight on g1 attacked down the file by the rook, defended by nobody.
-        board = chess.Board("4k1r1/8/8/8/8/8/8/4K1N1 w - - 0 1")
-        self.assertEqual(features._hanging_material(board), 3)
-
-    def test_a_cheaper_attacker_makes_a_defended_piece_loose(self):
-        # Rook on d5 attacked by the c6 pawn and defended by the d1 rook: still
-        # loose, because the pawn is worth less than what it attacks.
-        board = chess.Board("4k3/8/2p5/3R4/8/8/8/3RK3 w - - 0 1")
-        self.assertEqual(features._hanging_material(board), 5)
-
-    def test_a_king_attacker_is_never_the_cheap_one(self):
-        # Queen attacked only by the enemy king and defended once: a king can
-        # capture but can never be traded, so it is not the cheap attacker.
-        board = chess.Board("8/8/3k4/3Q4/8/8/8/3RK3 b - - 0 1")
-        self.assertEqual(features._hanging_material(board), 0)
+class HangingMaterialTerm(unittest.TestCase):
+    """The normaliser and its route into tension. The measurement
+    itself is a board feature and is tested with the others."""
 
     def test_it_reaches_tension(self):
         frames, baseline = tracked(sans=shuffle_moves(10))

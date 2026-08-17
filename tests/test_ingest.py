@@ -160,6 +160,26 @@ class FrameShape(unittest.TestCase):
         frames = ingest.ingest(write_pgn(build_pgn(["Rg7+", "Kf6"], fen=fen)))
         self.assertEqual(frames[0]["start_fen"], fen)
 
+    def test_result_and_termination_come_from_the_headers(self):
+        pgn = ('[Event "T"]\n[Result "0-1"]\n[Termination "Time forfeit"]\n\n'
+               "1. Nf3 Nf6 0-1\n")
+        frames = ingest.ingest(write_pgn(pgn))
+        self.assertEqual(frames[0]["result"], "0-1")
+        self.assertEqual(frames[0]["termination"], "Time forfeit")
+
+    def test_absent_termination_tag_is_none(self):
+        frames = ingest.ingest(write_pgn(build_pgn(shuffle_moves(2),
+                                                   result="1-0")))
+        self.assertEqual(frames[0]["result"], "1-0")
+        self.assertIsNone(frames[0]["termination"])
+
+    def test_an_unrecognised_result_is_reported(self):
+        pgn = '[Event "T"]\n[Result "1\u20130"]\n\n1. Nf3 Nf6 *\n'
+        with self.assertLogs("src.ingest", level="WARNING") as captured:
+            frames = ingest.ingest(write_pgn(pgn))
+        self.assertIn("unrecognised Result", "\n".join(captured.output))
+        self.assertEqual(frames[0]["result"], "1\u20130")
+
     def test_no_game_raises(self):
         with self.assertRaises(ValueError):
             ingest.ingest(write_pgn(""))

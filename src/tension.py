@@ -110,8 +110,17 @@ def _calibrate(value: float) -> float:
     raw so the dynamics are untouched. Monotone, so the ordering across games is
     exactly preserved and no game is rescaled against itself.
 
+    Applied to `tension` and to `cadence_strength`, which is a quantity of
+    tension and has to share its scale. Not to `stall`, a raw input term reported
+    for diagnosis, nor to `density`, which is a different axis with its own
+    meaning -- transforming those would put three unrelated scales through one
+    correction fitted to none of them.
+
     Calibrated against an eight-game corpus. That makes it a calibration, not a
     law; deciding what the number sounds like remains the renderer's business.
+    Note that the transform is not additive: a cadence and the tension left
+    behind no longer sum to the tension before it, so `cadence_strength` is the
+    size of the event, not the fraction discharged.
     """
     return _clamp(value) ** GAMMA
 
@@ -198,7 +207,7 @@ def _release_events(frame: dict, history: list[dict], is_last: bool) -> list[str
         if frame["san"].startswith("O-O") or escaped:
             events.append("king_safety")
 
-    if is_last and frame.get("result") in DECISIVE_RESULTS:
+    if is_last and frame["result"] in DECISIVE_RESULTS:
         # Only a decisive game resolves. A draw is a failure to resolve and an
         # unfinished game is an absence, and forcing a release onto either would
         # say something the game did not.

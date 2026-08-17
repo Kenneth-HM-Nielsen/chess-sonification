@@ -24,6 +24,8 @@ log = logging.getLogger(__name__)
 
 MATE_CP = 10000
 
+KNOWN_RESULTS = ("1-0", "0-1", "1/2-1/2", "*")
+
 
 # (moves_in_period, base_seconds, increment). moves_in_period None means "to the
 # end of the game"; base_seconds None means the header gave no usable allocation.
@@ -178,6 +180,9 @@ def ingest(pgn_path: Path) -> list[dict]:
     periods = parse_time_control(time_control)
     start_fen = game.board().fen()
     result = game.headers.get("Result")
+    if result not in KNOWN_RESULTS:
+        log.warning("%s: unrecognised Result %r; treated as unfinished",
+                    pgn_path.name, result)
     termination = game.headers.get("Termination")
     # Without a usable allocation there is no way to tell an instant reply from a
     # bulk credit, so unexplained clock rises are reported as unknown, not zero.
