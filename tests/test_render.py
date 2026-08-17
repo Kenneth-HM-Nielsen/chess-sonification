@@ -75,6 +75,15 @@ def shape(samples):
             float(np.sqrt((samples ** 2).mean())))
 
 
+def rms(samples):
+    return float(np.sqrt((samples ** 2).mean()))
+
+
+def sine(hz, seconds=0.2):
+    time = np.arange(int(seconds * render.SAMPLE_RATE)) / render.SAMPLE_RATE
+    return np.sin(2 * np.pi * hz * time)
+
+
 class Colour(unittest.TestCase):
     def test_the_cutoff_follows_the_note_rather_than_being_fixed(self):
         """A fixed cutoff sits above a low note's whole spectrum and does nothing.
@@ -87,20 +96,34 @@ class Colour(unittest.TestCase):
             with self.subTest(midi=midi):
                 hz = render._frequency(midi)
                 probe = harmonic_probe(hz)
-                bright = centroid(render._colour(probe.copy(), "w", hz))
-                dark = centroid(render._colour(probe.copy(), "b", hz))
+                bright = centroid(render._colour(probe, "w", hz))
+                dark = centroid(render._colour(probe, "b", hz))
                 self.assertGreater(bright / dark, 1.2)
 
     def test_dark_keeps_less_of_the_spectrum_than_bright(self):
         hz = render._frequency(62)
         probe = harmonic_probe(hz)
-        self.assertLess(spread(render._colour(probe.copy(), "b", hz)),
-                        spread(render._colour(probe.copy(), "w", hz)))
+        self.assertLess(spread(render._colour(probe, "b", hz)),
+                        spread(render._colour(probe, "w", hz)))
 
     def test_both_colours_are_defined_and_ordered(self):
-        self.assertEqual(set(render.CUTOFF_HARMONIC), {"w", "b"})
+        self.assertEqual(render.CUTOFF_HARMONIC, {"w": 9.0, "b": 2.6})
         self.assertGreater(render.CUTOFF_HARMONIC["w"],
                            render.CUTOFF_HARMONIC["b"])
+
+    def test_the_lowpass_is_steep_enough_to_remove_what_it_passes_over(self):
+        """Pins the filter order, which nothing else does.
+
+        A fourth-order Butterworth is down about 24 dB an octave above its
+        cutoff; a first-order one is down 7 dB and would leave the harmonics it
+        claims to remove clearly present.
+        """
+        fundamental = 200.0
+        above = 2.0 * render.CUTOFF_HARMONIC["b"] * fundamental
+        tone = sine(above)
+        filtered = render._colour(tone, "b", fundamental)
+        half = len(tone) // 2      # past the filter's own transient
+        self.assertGreater(rms(tone[half:]) / rms(filtered[half:]), 8.0)
 
 
 class FadeOrder(unittest.TestCase):
@@ -109,19 +132,63 @@ class FadeOrder(unittest.TestCase):
     def test_filtering_after_the_fade_leaves_a_step_at_the_note_end(self):
         hz = render._frequency(50)
         probe = harmonic_probe(hz)
-        correct = render._declick(render._colour(probe.copy(), "b", hz))
-        reversed_order = render._colour(render._declick(probe.copy()), "b", hz)
+        correct = render._declick(render._colour(probe, "b", hz))
+        reversed_order = render._colour(render._declick(probe), "b", hz)
         self.assertLess(abs(float(correct[-1])), 1e-9)
         self.assertGreater(abs(float(reversed_order[-1])),
                            abs(float(correct[-1])) + 1e-4)
 
-    def test_the_fade_touches_only_the_ends(self):
-        probe = harmonic_probe(220.0)
-        faded = render._declick(probe.copy())
-        fade = int(render.FADE_SECONDS * render.SAMPLE_RATE)
-        np.testing.assert_allclose(faded[fade:-fade], probe[fade:-fade])
-        self.assertLess(abs(float(faded[0])), 1e-9)
-        self.assertLess(abs(float(faded[-1])), 1e-9)
+    def test_both_ends_are_faded(self):
+        """On a constant block, so that a missing fade cannot hide in the signal.
+
+        A probe built from sines all at phase zero starts at exactly 0.0, which
+        made the assertion about the *leading* fade unfailable: deleting that
+        fade left the test green.
+        """
+        block = np.ones(int(0.05 * render.SAMPLE_RATE))
+        faded = render._declick(block)
+        self.assertLess(float(faded[0]), 1e-9)
+        self.assertLess(float(faded[-1]), 1e-9)
+        self.assertEqual(float(faded[len(faded) // 2]), 1.0)
+
+    def test_the_fade_is_short_enough_to_be_a_declick_and_not_an_envelope(self):
+        """Pinned to a literal, and to a consequence measured at a fixed offset.
+
+        Taking the offset from the constant instead would move the measurement
+        with it, and a half-second fade in and out of every note would pass.
+        """
+        self.assertEqual(render.FADE_SECONDS, 0.005)
+        block = np.ones(int(0.10 * render.SAMPLE_RATE))
+        faded = render._declick(block)
+        at = int(0.02 * render.SAMPLE_RATE)
+        self.assertEqual(float(faded[at]), 1.0)
+        self.assertEqual(float(faded[-at]), 1.0)
+
+    def test_the_fade_leaves_the_caller_s_array_alone(self):
+        block = np.ones(1000)
+        render._declick(block)
+        self.assertEqual(float(block[0]), 1.0)
+        self.assertEqual(float(block[-1]), 1.0)
+
+    def test_a_block_shorter_than_two_fades_is_still_faded(self):
+        """The clamp on the fade length, which nothing else reaches."""
+        short = np.ones(11)
+        faded = render._declick(short)
+        self.assertEqual(len(faded), 11)
+        self.assertLess(float(faded[0]), 1e-9)
+        self.assertLess(float(faded[-1]), 1e-9)
+
+    def test_the_per_note_primitives_refuse_a_stereo_block(self):
+        """A stereo block through `sosfilt` is filtered across the channels.
+
+        It comes out wrong and raises nothing, so the guard is the only thing
+        between that and a note that is quietly mangled.
+        """
+        stereo = np.ones((100, 2))
+        with self.assertRaises(ValueError):
+            render._declick(stereo)
+        with self.assertRaises(ValueError):
+            render._colour(stereo, "w", 200.0)
 
 
 class Envelope(unittest.TestCase):
@@ -141,10 +208,31 @@ class Envelope(unittest.TestCase):
 
 
 class Pitch(unittest.TestCase):
+    def test_the_scale_is_a_major_scale(self):
+        """Pinned to the literal degrees and to the interval pattern.
+
+        Comparing the measured degrees to `MAJOR_DEGREES` alone asserts nothing:
+        a chromatic run passes it while the scale the module documents is gone.
+        """
+        self.assertEqual(render.MAJOR_DEGREES, (0, 2, 4, 5, 7, 9, 11, 12))
+        steps = [b - a for a, b in zip(render.MAJOR_DEGREES,
+                                       render.MAJOR_DEGREES[1:])]
+        self.assertEqual(steps, [2, 2, 1, 2, 2, 2, 1])
+
     def test_file_selects_a_scale_degree(self):
         degrees = [render.midi_for_square(f + "1") for f in "abcdefgh"]
         self.assertEqual([d - degrees[0] for d in degrees],
                          list(render.MAJOR_DEGREES))
+
+    def test_the_bottom_of_the_board_sits_in_a_usable_bass(self):
+        """`BASE_MIDI` sets the register of the whole piece, and the drum's pitch.
+
+        The audible-middle check alone does not pin it: moving the root up an
+        octave keeps every square inside the range and moves everything the
+        renderer plays, so the root is pinned to a literal and to the note it is.
+        """
+        self.assertEqual(render.BASE_MIDI, 50)
+        self.assertAlmostEqual(render._frequency(render.BASE_MIDI), 146.83, places=1)
 
     def test_rank_raises_the_octave(self):
         self.assertEqual(render.midi_for_square("a3") - render.midi_for_square("a1"), 12)
@@ -174,8 +262,21 @@ class Mixer(unittest.TestCase):
         # to the whole buffer, so the ratio survives it.
         self.assertAlmostEqual(float(audio[7, 0]) / float(audio[2, 0]), 2.0, places=5)
 
-    def test_the_peak_is_reached_exactly_once_normalised(self):
+    def test_a_quiet_mix_is_brought_up_to_the_peak(self):
         audio = render._mix([(0, self._block(100, 0.01, 0.01))], total=100)
+        self.assertAlmostEqual(float(np.abs(audio).max()), render.PEAK, places=6)
+
+    def test_a_loud_mix_is_brought_down_below_clipping(self):
+        """`PEAK` pinned to a literal and to the consequence of being one.
+
+        Comparing the output's maximum to `PEAK` alone holds for every value of
+        `PEAK`, including 1.5, where every render clips from end to end, and 0.05,
+        where every render is inaudible.
+        """
+        self.assertEqual(render.PEAK, 0.89)
+        audio = render._mix([(0, self._block(100, 4.0, -4.0))], total=100)
+        self.assertLess(float(np.abs(audio).max()), 1.0)
+        self.assertGreater(float(np.abs(audio).max()), 0.5)
         self.assertAlmostEqual(float(np.abs(audio).max()), render.PEAK, places=6)
 
     def test_a_block_past_the_stated_total_extends_the_buffer(self):
@@ -223,6 +324,20 @@ class Output(unittest.TestCase):
         short, _ = self._render(*self._game(8))
         long, _ = self._render(*self._game(40))
         self.assertGreater(len(long), len(short) * 3)
+
+    def test_the_timeline_is_one_step_per_ply(self):
+        """Pins seconds per ply, not just that more plies is longer.
+
+        Dropping the step out of the timeline length -- `len(frames)` samples
+        instead of `len(frames)` steps -- turns a two-minute render into two
+        milliseconds and leaves the longer-render comparison green.
+        """
+        self.assertEqual(render.STEP_SECONDS, 0.50)
+        plies = 12
+        audio, rate = self._render(*self._game(plies))
+        self.assertGreaterEqual(len(audio) / rate, plies * render.STEP_SECONDS - 0.01)
+        # A block sounding on the last ply may ring past the grid; nothing else may.
+        self.assertLess(len(audio) / rate, plies * render.STEP_SECONDS + 3.0)
 
     def test_renders_a_game_with_no_clocks_and_no_evaluations(self):
         frames, track = self._game()

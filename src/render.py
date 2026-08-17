@@ -82,22 +82,45 @@ def _envelope(length: int, attack: float, decay: float, sustain: float) -> np.nd
     return envelope
 
 
+def _require_mono(samples: np.ndarray, what: str) -> None:
+    """Both per-note primitives are mono-only, and both fail badly on a block.
+
+    `_declick`'s fade broadcasts against the channel axis and raises, which is
+    survivable. `signal.sosfilt` filters the last axis by default, so a stereo
+    block would be filtered *across its two channels* instead of along time and
+    come out quietly wrong with no error at all. Hence a guard rather than
+    axis-handling: the pipeline is synthesise mono, filter, fade, and pan last,
+    and anything arriving here two-dimensional has that order wrong.
+    """
+    if samples.ndim != 1:
+        raise ValueError(
+            f"{what} takes a mono block, got shape {samples.shape}; filter and "
+            "fade in mono and pan last"
+        )
+
+
 def _declick(samples: np.ndarray) -> np.ndarray:
-    """Fade both ends to zero.
+    """Fade both ends of a copy to zero.
 
     Applied after filtering, not before: the lowpass rings past the end of the
     envelope, so fading first leaves a step at the note boundary that reappears
     as a click once notes are summed.
+
+    Returns a new array. A fade applied in place to a shared or cached block
+    fades it twice, and the second fade is inaudible until it is not.
     """
-    fade = min(int(FADE_SECONDS * SAMPLE_RATE), len(samples) // 2)
+    _require_mono(samples, "_declick")
+    faded = samples.copy()
+    fade = min(int(FADE_SECONDS * SAMPLE_RATE), len(faded) // 2)
     if fade > 0:
-        samples[:fade] *= np.linspace(0.0, 1.0, fade)
-        samples[-fade:] *= np.linspace(1.0, 0.0, fade)
-    return samples
+        faded[:fade] *= np.linspace(0.0, 1.0, fade)
+        faded[-fade:] *= np.linspace(1.0, 0.0, fade)
+    return faded
 
 
 def _colour(samples: np.ndarray, colour: str, fundamental: float) -> np.ndarray:
     """Bright against dark, at a cutoff relative to the note's fundamental."""
+    _require_mono(samples, "_colour")
     cutoff = CUTOFF_HARMONIC[colour] * fundamental / (SAMPLE_RATE / 2)
     sections = signal.butter(4, min(max(cutoff, 1e-4), 0.99), btype="low",
                              output="sos")

@@ -127,8 +127,9 @@ a fresh opinion.
   substitute a neutral default.
 - **A premove is not a fast decision, and a clamped value is neither.**
   `decision_state` is three-valued. The constants are `features.DECIDED`
-  (`"decided"`), `features.PREMOVE`, `features.UNKNOWN`. No `decision` anywhere:
-  the boolean-era noun read as the yes half of a yes/no on a three-valued field.
+  (`"decided"`), `features.PREMOVE`, `features.UNKNOWN`. No identifier and no
+  value spelled `decision`: the boolean-era noun read as the yes half of a
+  yes/no on a three-valued field.
 
 ---
 
@@ -192,7 +193,9 @@ the narrative and agrees with it. QA reports; the builder fixes. Report QA
 findings including ones you disagree with, with reasoning.
 
 **Read `GOTCHAS.md` before writing tests, not after QA finds the same defect
-again.** Both entries have already been repeated by the session that added them.
+again.** Entries there have already been repeated by the sessions that added
+them — most often "never assert an implementation constant against itself" and
+"a test must be shown to enter the branch it guards".
 
 Tests run with `python -m tests.run` (`--strict` makes a skip a failure).
 
