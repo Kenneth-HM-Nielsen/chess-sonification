@@ -1,12 +1,13 @@
 # CLAUDE.md — chess-sonification
 
-Read this first, every session. Then read the CCI for the current phase in `docs/cci/`.
+Read this first, every session. Then read the current phase spec,
+`docs/cci/CCI-4.1-phase4.md`.
 
 **Reconcile before trusting.** Verify constant names, module paths and fixture
 counts against the actual code, and correct this file where it has drifted. Do
 not assume a file exists because it is named here.
 
-*Last reconciled against the repo at `da2215a` (sub-phase 4a).*
+*Last reconciled against the repo at `5da42b6` (start of CCI 4.1).*
 
 ---
 
@@ -29,18 +30,22 @@ comments or commit messages.
 
 - Python 3.11+, plain. No frameworks, no config systems.
 - Dependencies: `chess`, `numpy`, `scipy`, `soundfile`, plus `matplotlib` for
-  diagnostic plots. Nothing else without asking. (The library is imported as
-  `chess`; `python-chess` on PyPI is a deprecation shim.)
+  diagnostic plots. Nothing else without asking. `requirements.txt` pins
+  `chess>=1.11` and that is the whole story: the chess library is published on
+  PyPI as `chess` and imported as `chess`. `python-chess` is only a deprecation
+  shim for the old name and must not appear in the requirements. Verified by a
+  dry-run install into an empty environment, which resolves `chess-1.11.2`.
 - **No chess engine.** Stockfish is unavailable and must never become a
   dependency. Evaluations come only from `[%eval]` annotations already in the
   PGN. Everything else is derived from board state.
 - **No sample libraries or SoundFonts.** Audio is synthesised from numpy arrays.
   This constraint is what keeps the browser port viable, and it is why
   "orchestral" means synthesised orchestral timbre, not sampled instruments.
-- Never commit PGN files or rendered audio. The only committed game data is
-  `tests/fixtures/*.pgn` — short synthetic games written for the suite.
-  `data/pgn/`, `data/frames/` and `out/` are all gitignored; no frame JSON is
-  tracked.
+- Never commit game data or rendered audio. There is exactly one exception:
+  `tests/fixtures/*.pgn`, short synthetic games written for the suite. Real PGNs
+  (`data/pgn/`), extracted frame JSON (`data/frames/`) and renders (`out/`) are
+  gitignored, so no frame JSON is tracked and the suite must never depend on
+  any.
 
 ---
 
@@ -166,8 +171,9 @@ wherever it governs.
 
 ## Engineering discipline
 
-**DRY.** One definition per concept. The Python/JS duplication in the planned
-web app is the standing hazard; golden-file tests are the contract.
+**DRY.** One definition per concept. Duplicating the analysis in a second
+language, if the web app ever does, is the standing hazard; golden-file tests
+are the contract.
 
 **YAGNI.** No fields nothing reads. No abstraction with one implementation. If a
 feature measures zero across all fixtures, remove it.
@@ -213,17 +219,13 @@ Update this section at the end of every phase.
   progress/stall, hanging material.
 - **Phase 3 (tension)** — complete and QA-clean. Five tension sources including
   `hanging_material`, graded cadence, global GAMMA calibration.
-- **Phase 4 (render)** — 4a of CCI 4.0 built (six synthesised voices, colour by
-  pitch-relative lowpass, fixed major scale) and committed at `da2215a`, but
-  **superseded by the orchestral redesign**, whose spec is not yet in the repo.
-  4a's listening gate was never returned, and the bishop colour question is
-  still open: a lowpass cannot darken a near-pure sine, so five voices carry
-  colour at 1.11–1.83× and the bishop only 1.08×.
-- **Phase 5 (CLI)** — the three commands (`render`, `frames`, `plot`) exist and
-  work; they were built with the scaffold. Nothing further is specified.
-- **Web app** — not started. Its CCI needs two corrections before use: it
-  assumes mono output, and it frames Lichess as strictly the better source when
-  chess.com records clocks at tenths and is better for bullet and blitz.
+- **Phase 4 (render)** — in progress against `docs/cci/CCI-4.1-phase4.md`. The
+  earlier sub-phase 4a (six additive sine voices, committed at `da2215a`) is
+  superseded and its spectra have been deleted; its listening gate was never
+  returned. What survived 4a is named in that spec: pitch-relative lowpass,
+  fade after filtering, and the separation-floor harness.
+- **Phase 5 (CLI)** — complete. `render`, `frames` and `plot` exist and work.
+- **Web app** — not started. Its spec will be written when the phase begins.
 
 170 tests, green. `tests/fixtures/` holds 7 committed synthetic games;
 `data/pgn/` holds 9 real games locally and is gitignored.
@@ -235,6 +237,5 @@ Update this section at the end of every phase.
 Branch each piece of work off up-to-date `main`. Converge to `main` and delete
 the branch, local and remote, once merged.
 
-*Currently diverged: all 19 commits of phases 1–4a sit on
-`feat/sonification-core`, and `main` is still at the scaffold. This wants
-resolving before more branches are cut.*
+*Converged at `5da42b6`: phases 1–4a are on `main` and `feat/sonification-core`
+is deleted local and remote. Phase 4 continues on `feat/orchestral-renderer`.*
