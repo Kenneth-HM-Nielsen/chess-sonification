@@ -121,6 +121,23 @@ def generator():
     return np.random.default_rng(render.RNG_SEED)
 
 
+def wobble(samples, decay):
+    """Spread of the log-envelope once the exponential trend is taken out.
+
+    The fraction of rising steps in an envelope follower does not work for this:
+    bandpassed noise already fluctuates, so that statistic sits at 0.495 whether
+    the wander is at full depth or switched off entirely. Detrending against the
+    exponential the envelope is *supposed* to be leaves only what the wander adds:
+    0.07-0.11 at full depth against 0.027-0.032 with it deleted.
+    """
+    follower = envelope(samples, window=0.02)
+    lo, hi = int(0.10 * render.SAMPLE_RATE), int(2.0 * decay * render.SAMPLE_RATE)
+    segment = np.maximum(follower[lo:hi], 1e-12)
+    time = np.arange(len(segment)) / render.SAMPLE_RATE
+    fit = np.polyfit(time, np.log(segment), 1)
+    return float((np.log(segment) - np.polyval(fit, time)).std())
+
+
 class Colour(unittest.TestCase):
     def test_the_cutoff_follows_the_note_rather_than_being_fixed(self):
         """A fixed cutoff sits above a low note's whole spectrum and does nothing.
@@ -385,25 +402,46 @@ class Cymbal(unittest.TestCase):
     def test_the_attack_is_immediate(self):
         """A struck cymbal, not one swelled into.
 
-        Measured on the envelope near the start rather than on where its peak
-        lands: the follower's own 4 ms window and the wander ramping in behind the
-        strike both move the peak a few milliseconds later without making the
-        attack any slower.
+        Measured on the envelope near the start, not on where its peak lands.
+        `argmax` of a noise envelope is a property of the draw: over 200 draws it
+        ranged from 5 ms to 320 ms and exceeded a 25 ms bound on 31 of them, so an
+        assertion on it is green only for as long as the seed and the draw order
+        hold. This ratio had no failures in 200, with a minimum of 0.444.
         """
-        rng = generator()
-        block = mono(render.cymbal(9, "w", rng))
-        follower = envelope(block)
-        at_3ms = float(follower[int(0.003 * render.SAMPLE_RATE)])
-        self.assertGreater(at_3ms / float(follower.max()), 0.4)
-        self.assertLess(shape(block)[0], 0.025)
+        for seed in range(4):
+            with self.subTest(seed=seed):
+                follower = envelope(mono(
+                    render.cymbal(9, "w", np.random.default_rng(seed))))
+                at_3ms = float(follower[int(0.003 * render.SAMPLE_RATE)])
+                self.assertGreater(at_3ms / float(follower.max()), 0.4)
 
     def test_the_decay_is_ragged_rather_than_a_clean_exponential(self):
-        """An exponential tail reads as a synthesised sweep, not as a cymbal."""
-        rng = generator()
-        tail = envelope(mono(render.cymbal(9, "w", rng)),
-                        window=0.02)[int(0.25 * render.SAMPLE_RATE):]
-        rises = int((np.diff(tail) > 0).sum())
-        self.assertGreater(rises / len(tail), 0.05)
+        """An exponential tail reads as a synthesised sweep, not as a cymbal.
+
+        See `wobble` for why this is not measured as rising steps in an envelope
+        follower, which was the first attempt and could not tell full depth from
+        no wander at all.
+        """
+        for seed in range(4):
+            with self.subTest(seed=seed):
+                block = mono(render.cymbal(9, "w", np.random.default_rng(seed)))
+                self.assertGreater(wobble(block, render.CYMBAL_DECAY_S[1]), 0.05)
+
+    def test_the_tail_is_spent_before_the_buffer_ends(self):
+        """Otherwise the declick has a step to hide, and every capture clicks.
+
+        The buffer runs 2.4 decay constants, which leaves the tail at 9% of peak
+        for the 5 ms fade to take. At 1.0 it would end at 37% and the fade would
+        be a click at about -9 dB on every single capture, with nothing else in
+        the suite the wiser: `audible_seconds` cannot see it, because an envelope
+        that never falls below 5% of its peak still scales with the decay.
+        """
+        for value in VALUES:
+            with self.subTest(value=value):
+                block = mono(render.cymbal(value, "w", generator()))
+                follower = envelope(block, window=0.02)
+                near_end = float(follower[-int(0.03 * render.SAMPLE_RATE)])
+                self.assertLess(near_end / float(follower.max()), 0.15)
 
     def test_the_strike_itself_is_not_left_to_the_noise_draw(self):
         """How big a capture sounds must not depend on the random draw.
@@ -412,10 +450,10 @@ class Cymbal(unittest.TestCase):
         same value struck twice comes out at the same level.
         """
         levels = [level(mono(render.cymbal(9, "w", np.random.default_rng(seed))))
-                  for seed in range(8)]
-        # 10% across eight draws, which is 0.9 dB. Normalising the noise to its
-        # loudest sample instead of its power gave 16%, and the residue here is
-        # the wander ramping in over the envelope's peak.
+                  for seed in range(30)]
+        # 11.6% across thirty draws, which is 1 dB. Letting the wander run over
+        # the strike instead of ramping in behind it gives 19.8%, and normalising
+        # the noise to its loudest sample rather than its power gave 16%.
         self.assertLess((max(levels) - min(levels)) / min(levels), 0.15)
 
     def test_a_cymbal_starts_and_ends_at_silence(self):
@@ -435,8 +473,11 @@ class Cymbal(unittest.TestCase):
         rng = generator()
         biggest = mono(render.cymbal(27, "w", rng))
         queen = mono(render.cymbal(9, "w", rng))
+        # Length, not level: the two are independent noise draws, so their levels
+        # differ by up to 19% across seeds and an equality on them would be
+        # measuring the draw rather than the clamp.
         self.assertEqual(len(biggest), len(queen))
-        self.assertAlmostEqual(level(biggest) / level(queen), 1.0, delta=0.15)
+        self.assertLess(float(np.abs(biggest).max()), 1.3)
 
 
 class Timpani(unittest.TestCase):
@@ -548,12 +589,16 @@ def quiet_frames(count, colour="w"):
 
 class Roll(unittest.TestCase):
     def test_nothing_is_played_below_the_floor(self):
-        below = render.percussion(quiet_frames(4),
-                                  track_of([render.TIMPANI_FLOOR * 0.5] * 4))
-        above = render.percussion(quiet_frames(4),
-                                  track_of([render.TIMPANI_FLOOR * 1.5] * 4))
-        self.assertEqual(below, [])
-        self.assertGreater(len(above), 0)
+        """Literal stall values either side of a literal floor.
+
+        Taking the two fixtures from `TIMPANI_FLOOR` itself would move them with
+        it, and the bracket would hold for any value at all -- including one above
+        the range `stall` occupies, which silences the roll for every game.
+        """
+        self.assertEqual(render.TIMPANI_FLOOR, 0.02)
+        self.assertEqual(render.percussion(quiet_frames(4), track_of([0.01] * 4)), [])
+        self.assertGreater(len(render.percussion(quiet_frames(4),
+                                                 track_of([0.05] * 4))), 0)
 
     def test_the_roll_grows_with_the_stall_term(self):
         levels = []
@@ -580,19 +625,114 @@ class Roll(unittest.TestCase):
         taut = render.percussion(quiet_frames(6), track_of([1.0] * 6, tension=1.0))
         self.assertGreater(len(taut), len(slack))
 
-    def test_every_stroke_falls_inside_the_ply_that_asked_for_it(self):
-        """Otherwise a roll would run past a reset it is supposed to stop at."""
+    def test_the_strokes_are_spread_across_the_ply_that_asked_for_them(self):
+        """A roll is strokes in sequence, not one thud per ply.
+
+        Striking every stroke of a step at the step's own onset passes a test that
+        only counts the strokes and bounds their onsets from above, and it turns
+        the roll -- which is half of what B1 is for -- into one incoherent thump
+        every half second.
+        """
+        step = int(render.STEP_SECONDS * render.SAMPLE_RATE)
         for tension in (0.0, 0.5, 1.0):
             with self.subTest(tension=tension):
-                blocks = render.percussion(quiet_frames(1),
-                                           track_of([1.0], tension=tension))
-                step = int(render.STEP_SECONDS * render.SAMPLE_RATE)
-                self.assertGreater(len(blocks), 1)
-                self.assertLess(max(onset for onset, _ in blocks), step)
+                onsets = sorted(onset for onset, _ in render.percussion(
+                    quiet_frames(1), track_of([1.0], tension=tension)))
+                self.assertGreater(len(onsets), 1)
+                self.assertLess(max(onsets), step)
+                self.assertGreater(max(onsets) - min(onsets), 0.6 * step)
+                # Evenly spread, so that the join between two plies is the same
+                # interval as the strokes inside one.
+                nominal = step / len(onsets)
+                for gap in np.diff(onsets):
+                    self.assertGreater(gap, 0.5 * nominal)
+                    self.assertLess(gap, 1.5 * nominal)
+
+    def test_no_stroke_is_struck_before_the_ply_it_belongs_to(self):
+        """The jitter is clamped below as well as bounded above.
+
+        Unclamped, a negative jitter on the first stroke of a step put it up to
+        13 ms ahead of its own ply, which puts strokes in front of a reset the
+        roll exists to stop at.
+
+        The window is derived from the ply that carries the roll, not from the
+        onsets themselves: selecting the onsets past a boundary and then asserting
+        they are past it holds however far the whole roll has been displaced.
+        """
+        step = int(render.STEP_SECONDS * render.SAMPLE_RATE)
+        # Only the fourth ply is above the floor, so every stroke belongs to it.
+        blocks = render.percussion(quiet_frames(6),
+                                   track_of([0.0, 0.0, 0.0, 1.0, 0.0, 0.0]))
+        self.assertGreater(len(blocks), 1)
+        for onset, _ in blocks:
+            self.assertGreaterEqual(onset, 3 * step)
+            self.assertLess(onset, 4 * step)
+
+    def test_the_roll_is_jittered_in_level(self):
+        """A roll at one level sounds like a machine, not a player.
+
+        Measured on each block's peak, which is exactly the level applied: every
+        stroke leaves `timpani` at unit peak and is then scaled. Block *energy*
+        does not work -- each stroke is a fresh draw, so the energies differ even
+        with the level jitter switched off.
+        """
+        blocks = render.percussion(quiet_frames(2), track_of([1.0] * 2))
+        peaks = {round(float(np.abs(block).max()), 9) for _, block in blocks}
+        self.assertEqual(len(peaks), len(blocks))
+
+    def test_the_roll_is_jittered_in_time(self):
+        blocks = render.percussion(quiet_frames(2), track_of([1.0] * 2))
+        onsets = sorted(onset for onset, _ in blocks)
+        gaps = np.diff(onsets)
+        self.assertGreater(len(set(gaps.tolist())), len(gaps) // 2)
+
+    def test_the_join_between_two_plies_is_the_same_interval_as_within_one(self):
+        """Otherwise the roll hiccups once per ply, for the whole roll.
+
+        Spacing the strokes at the nominal 1/rate from the start of each step
+        leaves the rounding remainder at the end of it: at nine strokes a second
+        that is a gap half again as long as the others, twice a second. Both the
+        remainder gap and the internal gaps are within the jitter's range
+        individually, so this is asserted on the means -- 60 internal gaps against
+        19 joins -- where the jitter averages out and a 1.5x remainder does not.
+        """
+        step = int(render.STEP_SECONDS * render.SAMPLE_RATE)
+        plies = 20
+        blocks = render.percussion(quiet_frames(plies),
+                                   track_of([1.0] * plies, tension=0.0))
+        per_ply = [sorted(onset for onset, _ in blocks
+                          if index * step <= onset < (index + 1) * step)
+                   for index in range(plies)]
+        internal = [gap for onsets in per_ply for gap in np.diff(onsets)]
+        joins = [nxt[0] - cur[-1] for cur, nxt in zip(per_ply, per_ply[1:])]
+        self.assertGreater(len(internal), 40)
+        self.assertEqual(len(joins), plies - 1)
+        self.assertLess(np.mean(joins) / np.mean(internal), 1.15)
 
     def test_the_roll_is_centred_because_it_is_nobody_s_colour(self):
         for _, block in render.percussion(quiet_frames(4), track_of([1.0] * 4)):
             self.assertAlmostEqual(rms(block[:, 0]), rms(block[:, 1]), places=9)
+
+    def test_a_crash_stands_above_a_saturated_roll(self):
+        """The balance a listening gate turns on, pinned as a bracket.
+
+        Either side of it is a real failure and neither is otherwise caught,
+        because `_mix` normalises the whole render: making the cymbal four times
+        louder or the roll eight times louder changes nothing about the peak, only
+        what is buried under what.
+        """
+        crash = level(mono(render.cymbal(9, "w", generator())))
+        blocks = render.percussion(quiet_frames(8), track_of([1.0] * 8))
+        span = max(onset + len(block) for onset, block in blocks)
+        buffer = np.zeros((span, 2))
+        for onset, block in blocks:
+            buffer[onset:onset + len(block)] += block
+        settled = mono(buffer[int(1.0 * render.SAMPLE_RATE):
+                              int(3.5 * render.SAMPLE_RATE)])
+        # Both are mono sums of panned blocks, so the pan law divides out.
+        ratio = crash * 2 / level(settled)
+        self.assertGreater(ratio, 1.4)
+        self.assertLess(ratio, 3.5)
 
     def test_a_track_of_a_different_length_is_refused(self):
         with self.assertRaises(ValueError):
@@ -600,11 +740,13 @@ class Roll(unittest.TestCase):
 
 
 class Corpus(unittest.TestCase):
-    """The committed corpus must reach the code these tests guard.
+    """The corpus must reach the code these tests guard.
 
     A separation floor no fixture exercises is a green light wired to nothing, so
     the rungs of the capture scale and the shape of a build are asserted against
-    games that are actually in the repository.
+    games that are present on a fresh clone -- the committed PGN for the captures,
+    and one built at run time from `tests.helpers` for the build, since no
+    committed game both saturates the stall term and then breaks it.
     """
 
     @staticmethod
@@ -635,7 +777,7 @@ class Corpus(unittest.TestCase):
         entries = tension.tension_track(frames)["plies"]
         stalls = [entry["stall"] for entry in entries]
         self.assertAlmostEqual(max(stalls), 1.0, places=3)
-        self.assertLess(stalls[-1], render.TIMPANI_FLOOR)
+        self.assertLess(stalls[-1], 0.02)
 
         blocks = render.percussion(frames, entries)
         break_at = int(50 * render.STEP_SECONDS * render.SAMPLE_RATE)
@@ -769,6 +911,26 @@ class Output(unittest.TestCase):
         self.assertGreater(float(np.abs(audio).max()), 0.5)
         self.assertGreater(len(render.percussion(frames, track["plies"])), 10)
 
+    def test_a_queen_capture_is_bigger_than_a_pawn_capture_in_the_file(self):
+        """The gate's question, asserted on the audio and not on the synthesiser.
+
+        Every other size assertion calls `cymbal` directly with a value of its
+        own. Normalising each block on its way into the mix would flatten the
+        whole scale -- every capture at one loudness -- and passes all of them,
+        because the peak, the overlap ratio and the clipping bound are all
+        untouched by it. This is the only test that fails.
+
+        Windows from `tests/fixtures/tactical_decisive.pgn`: Bxb4 takes a pawn on
+        ply 8 and rings alone for two seconds, and Kxd7 takes a queen on ply 42
+        with only that ply's pawn tail anywhere near it.
+        """
+        frames, track = self._fixture("tactical_decisive.pgn")
+        audio, rate = self._render(frames, track)
+        pawn = audio[int(3.5 * rate):int(4.2 * rate)]
+        queen = audio[int(20.5 * rate):int(24.8 * rate)]
+        self.assertGreater(float(np.abs(queen).max()) / float(np.abs(pawn).max()), 3.0)
+        self.assertGreater(rms(queen) / rms(pawn), 2.5)
+
     def test_a_mono_downmix_keeps_the_signal_and_does_not_clip(self):
         audio, _ = self._render(*self._game())
         summed = audio.sum(axis=1) / 2.0
@@ -806,8 +968,11 @@ class Output(unittest.TestCase):
         """Load-bearing now that the renderer draws noise.
 
         This assertion was vacuous while the timeline was silent: two all-zero
-        arrays are equal whatever the generator does.
+        arrays are equal whatever the generator does. It is still process-local --
+        any seed fixed at import time, including a clock reading, is the same for
+        both renders here -- so the seed is pinned to a literal as well.
         """
+        self.assertEqual(render.RNG_SEED, 20260817)
         frames, track = self._game()
         first, _ = self._render(frames, track)
         second, _ = self._render(frames, track)

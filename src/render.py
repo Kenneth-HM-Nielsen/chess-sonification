@@ -25,8 +25,15 @@ Two events:
   toward the fifty-move threshold, pitched to the tonal centre so that it belongs
   harmonically
 
-Neither has a schedule hidden inside it. The roll stops when the stall term
-resets, which is the board's business and not the renderer's.
+Neither has a schedule hidden inside it. The roll stops being struck when the
+stall term resets, which is the board's business and not the renderer's. The
+strokes already in the air ring out over the reset for up to a stroke's length,
+because that is what a drum does; what stops dead is the striking.
+
+`_colour` and `CUTOFF_HARMONIC` are kept from 4a and are not in the audible path
+at B1 -- a cymbal has no fundamental to take a relative cutoff from, so its
+colour comes from the band's upper edge instead. They are what the piece voices
+will use in B2, and they are exercised by the suite meanwhile.
 
 Output is stereo, 44.1 kHz, float32.
 """
@@ -324,8 +331,12 @@ def _roll_blocks(ply: dict, onset: int,
     would be the renderer second-guessing a calibrated input. Rate follows
     tension, so a tenser position rolls tighter.
 
-    Every stroke lands inside the step that asked for it, which is what lets the
-    roll stop dead on a reset instead of ringing on over it.
+    Every stroke is struck inside the step that asked for it, and the strokes are
+    spread evenly across that step rather than laid out from its start at the
+    nominal interval. The difference is audible: rounding the count to a whole
+    number of strokes leaves the remainder at the end of every step, which at nine
+    strokes a second was a gap half again as long as the others, twice a second,
+    for the whole roll.
 
     Centred, and with no colour cue: the drum is not one side's, and pan means
     colour.
@@ -334,16 +345,20 @@ def _roll_blocks(ply: dict, onset: int,
     if intensity < TIMPANI_FLOOR:
         return []
 
-    rate = _lerp(TIMPANI_RATE_HZ, _clamp(ply["tension"]))
+    rate = _lerp(TIMPANI_RATE_HZ, ply["tension"])
     strokes = max(1, int(round(STEP_SECONDS * rate)))
+    spacing = STEP_SECONDS / strokes
     blocks = []
     for index in range(strokes):
         jitter = rng.uniform(-TIMPANI_JITTER_TIME, TIMPANI_JITTER_TIME)
-        at = onset + int((index + jitter) / rate * SAMPLE_RATE)
+        # Clamped at zero rather than left to go negative: without it the first
+        # stroke of a step can be struck before the step it belongs to, which puts
+        # strokes in front of a reset the roll is meant to stop at.
+        at = onset + int(max(0.0, index + jitter) * spacing * SAMPLE_RATE)
         level = TIMPANI_LEVEL * intensity * (
             1.0 + rng.uniform(-TIMPANI_JITTER_LEVEL, TIMPANI_JITTER_LEVEL)
         )
-        blocks.append((max(0, at), _pan(timpani(TIMPANI_MIDI, rng) * level, 0.0)))
+        blocks.append((at, _pan(timpani(TIMPANI_MIDI, rng) * level, 0.0)))
     return blocks
 
 

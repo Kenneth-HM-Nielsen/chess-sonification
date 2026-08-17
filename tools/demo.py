@@ -68,14 +68,14 @@ def cmd_excerpt(args: argparse.Namespace) -> int:
     from zero and the build would not be there.
     """
     from src import features, ingest, tension
+    from src.ingest import move_number_for_ply
 
     frames = features.annotate(ingest.ingest(args.pgn))
     track = tension.tension_track(frames)
 
-    first_ply = 2 * args.from_move - 1
-    last_ply = 2 * args.to_move
+    # Ply-to-move arithmetic is `ingest`'s, not restated here.
     keep = [index for index, frame in enumerate(frames)
-            if first_ply <= frame["ply"] <= last_ply]
+            if args.from_move <= move_number_for_ply(frame["ply"]) <= args.to_move]
     if not keep:
         print(f"{args.pgn.name} has no plies in moves "
               f"{args.from_move}-{args.to_move}", file=sys.stderr)

@@ -7,7 +7,7 @@ Read this first, every session. Then read the current phase spec,
 counts against the actual code, and correct this file where it has drifted. Do
 not assume a file exists because it is named here.
 
-*Last reconciled against the repo at `9694c51` (CCI 4.1, Part A complete).*
+*Last reconciled against the repo at `850b7cb` (CCI 4.1, Part A complete).*
 
 ---
 
@@ -171,9 +171,20 @@ wherever it governs.
 
 Render constants are not calibration in the same sense — they are musical
 choices, and they belong to `render` alone. The ones a listening gate can move
-are `CYMBAL_*`, `TIMPANI_*`, `PAN_COLOUR`, `CUTOFF_HARMONIC` and `STEP_SECONDS`.
-Every mapping they carry is pinned behaviourally, so flattening one fails the
-suite rather than going quiet.
+at B1 are `CYMBAL_*`, `TIMPANI_*`, `PAN_COLOUR` and `STEP_SECONDS`. Every
+*mapping* they carry is pinned behaviourally, so flattening one fails the suite:
+the capture scale, the roll's dependence on `stall` and on `tension`, the pan
+law, the mode inharmonicity and decays, the cymbal-against-roll balance.
+
+`CUTOFF_HARMONIC` and `_colour` are not in the audible path yet. A cymbal has no
+fundamental to take a relative cutoff from, so its colour comes from the band's
+upper edge; the relative lowpass is what the piece voices will use in B2. It is
+kept per the spec's A4 and exercised by the suite, not by a render.
+
+Known and deferred: `_mix` normalises each render to `PEAK`, so loudness is not
+comparable *between* games — a game whose only percussion is one pawn capture is
+pumped to the same peak as one with a queen crash. B4 and B5 need a fixed gain
+reference instead.
 
 ---
 
@@ -241,7 +252,7 @@ Update this section at the end of every phase.
 - **Phase 5 (CLI)** — complete. `render`, `frames` and `plot` exist and work.
 - **Web app** — not started. Its spec will be written when the phase begins.
 
-220 tests, green. `tests/fixtures/` holds 7 committed synthetic games;
+235 tests, green. `tests/fixtures/` holds 7 committed synthetic games;
 `data/pgn/` holds 9 real games locally and is gitignored.
 
 Listening-gate artifacts come from `tools/demo.py`, which is committed so a gate

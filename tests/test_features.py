@@ -366,6 +366,70 @@ class TimePressure(unittest.TestCase):
         self.assertTrue(all(f["time_pressure_w"] is None for f in frames))
 
 
+class Captures(unittest.TestCase):
+    """`captured_value` is read off the position, not differenced out of a total.
+
+    Both branches that make it more than a convenience are exercised here,
+    because neither is reachable from any other fixture in the repository: no
+    committed game contains an en passant capture, and none contains a promotion
+    at all. Without these, deleting the en passant branch and replacing the whole
+    function with a `material_total` difference both leave the suite green.
+    """
+
+    def test_the_value_is_what_the_move_took(self):
+        frames = synthetic("tactical_decisive.pgn")
+        by_san = {frame["san"]: frame["captured_value"] for frame in frames}
+        self.assertEqual(by_san["Bxb4"], 1)       # a pawn
+        self.assertEqual(by_san["Nxd5"], 3)       # a knight
+        self.assertEqual(by_san["Nxh8"], 5)       # a rook
+        self.assertEqual(by_san["Kxg2"], 9)       # a queen
+
+    def test_a_quiet_move_took_nothing(self):
+        frames = annotated(sans=["Nf3", "Nf6"])
+        self.assertEqual([frame["captured_value"] for frame in frames], [0, 0])
+
+    def test_an_en_passant_capture_took_a_pawn(self):
+        """The captured pawn is not on the square the capturer moves to.
+
+        `piece_at(to_square)` is `None` for an en passant capture, so without its
+        own branch this reports nothing taken while `is_capture` says otherwise.
+        """
+        frames = annotated(sans=["d5", "exd6"],
+                           fen="4k3/3p4/8/4P3/8/8/8/4K3 b - - 0 1")
+        self.assertEqual(frames[1]["san"], "exd6")
+        self.assertTrue(frames[1]["is_capture"])
+        self.assertEqual(frames[1]["captured_value"], 1)
+
+    def test_a_capturing_promotion_reports_only_what_it_took(self):
+        """The one case the `material_total` difference gets wrong.
+
+        axb8=Q takes five points of rook off the board and puts eight points of
+        queen on it, so the difference across the move is +3 where the capture is
+        5. Asserted on the difference too, so that the reason is visible.
+        """
+        frames = annotated(sans=["axb8=Q"],
+                           fen="1r6/P7/7k/8/8/8/8/4K3 w - - 0 1")
+        self.assertEqual(frames[0]["san"], "axb8=Q")
+        self.assertTrue(frames[0]["is_promotion"])
+        self.assertEqual(frames[0]["captured_value"], 5)
+        before = 1 + 5                                  # the pawn and the rook
+        self.assertEqual(frames[0]["material_total"] - before, 3)
+
+    def test_a_promotion_that_took_nothing_reports_nothing(self):
+        frames = annotated(sans=["a8=Q"], fen="8/P7/7k/8/8/8/8/4K3 w - - 0 1")
+        self.assertFalse(frames[0]["is_capture"])
+        self.assertEqual(frames[0]["captured_value"], 0)
+
+    def test_value_and_the_capture_flag_never_disagree(self):
+        """The two fields are redundant, and this is what keeps them honest."""
+        for name in ("tactical_decisive.pgn", "premove_chain.pgn",
+                     "two_controls.pgn", "clock_gap.pgn"):
+            for frame in synthetic(name):
+                with self.subTest(game=name, ply=frame["ply"]):
+                    self.assertEqual(bool(frame["captured_value"]),
+                                     frame["is_capture"])
+
+
 class ThinkShape(unittest.TestCase):
     def test_the_decision_states_are_spelled_as_frames_carry_them(self):
         """Pinned to literals, because these strings leave the process.
