@@ -76,6 +76,12 @@ RELEASE_DEPTH = {
 
 PAWN_BREAK_DROP = 2
 SIMPLIFICATION_POINTS = 5
+
+# A king walking out of real danger is an event. A king whose zone happens to be
+# one attacker quieter than last ply is not: without a floor and a meaningful
+# drop this fires on ordinary shuffling and discharges the build continuously.
+SHELTER_PRESSURE_FLOOR = 3
+SHELTER_PRESSURE_DROP = 2
 DENSITY_MOBILITY_SHARE = 0.55
 FORCING_STREAK_FULL = 3
 DOTTED_STREAK = 2
@@ -117,29 +123,44 @@ def _is_forcing(frame: dict) -> bool:
     return bool(frame["is_check"] or frame["is_capture"] or frame["forced"])
 
 
-def _release_events(frame: dict, previous: dict | None, history: list[dict],
-                    is_last: bool) -> list[str]:
+def _queens(fen: str) -> int:
+    """Queens on the board.
+
+    Counted over the piece placement alone: the castling field of a full FEN
+    also spells rights with Q and q, so a substring test over the whole string
+    reports queens that are not there and misses queens that are.
+    """
+    return fen.split(" ", 1)[0].count("Q") + fen.split(" ", 1)[0].count("q")
+
+
+def _release_events(frame: dict, history: list[dict], is_last: bool) -> list[str]:
     """Which release events, if any, this ply constitutes."""
     events: list[str] = []
 
-    if previous is not None:
+    if history:
+        previous = history[-1]
         if previous["locked_pawns"] - frame["locked_pawns"] >= PAWN_BREAK_DROP:
             events.append("pawn_break")
         if frame["halfmove_clock"] == 0 and previous["halfmove_clock"] > 0:
             events.append("progress_reset")
 
-        queens_before = "Q" in previous["fen_after"] or "q" in previous["fen_after"]
-        queens_now = "Q" in frame["fen_after"] or "q" in frame["fen_after"]
+        # Material *removed*, not the balance between the sides: an even trade
+        # leaves the balance where it was while emptying the board. Gated on the
+        # ply actually being a capture, so the quiet move after a recapture does
+        # not fire the same exchange a second time.
         two_back = history[-2] if len(history) >= 2 else previous
-        swing = abs(two_back["material_balance"] - frame["material_balance"])
-        traded = queens_before and not queens_now
-        if traded or swing >= SIMPLIFICATION_POINTS:
+        removed = two_back["material_total"] - frame["material_total"]
+        queens_gone = _queens(two_back["fen_after"]) > 0 and _queens(frame["fen_after"]) == 0
+        if frame["is_capture"] and (queens_gone or removed >= SIMPLIFICATION_POINTS):
             events.append("simplification")
 
-        castled = frame["san"].startswith("O-O")
         mover_pressure = f"king_pressure_{frame['color']}"
-        sheltered = frame[mover_pressure] < previous[mover_pressure]
-        if castled or (sheltered and previous[mover_pressure] > 0):
+        before, now = previous[mover_pressure], frame[mover_pressure]
+        escaped = (
+            before >= SHELTER_PRESSURE_FLOOR
+            and before - now >= SHELTER_PRESSURE_DROP
+        )
+        if frame["san"].startswith("O-O") or escaped:
             events.append("king_safety")
 
     if is_last:
@@ -175,8 +196,6 @@ def tension_track(frames: list[dict]) -> list[dict]:
     last_index = len(frames) - 1
 
     for index, frame in enumerate(frames):
-        previous = history[-1] if history else None
-
         terms = {
             "structure": _structure(frame),
             "king": _king(frame),
@@ -197,7 +216,7 @@ def tension_track(frames: list[dict]) -> list[dict]:
 
         tension += ATTACK * (drive - tension)
 
-        events = _release_events(frame, previous, history, index == last_index)
+        events = _release_events(frame, history, index == last_index)
         cadence_strength = 0.0
         if events:
             depth = max(RELEASE_DEPTH[event] for event in events)
@@ -214,7 +233,7 @@ def tension_track(frames: list[dict]) -> list[dict]:
                 "pressure_b": frame["time_pressure_b"],
                 "density": round(_density(frame, forcing_streak), 4),
                 "meter": "dotted" if forcing_streak >= DOTTED_STREAK else "free",
-                "cadence_strength": round(cadence_strength, 4),
+                "cadence_strength": round(cadence_strength, 6),
                 "stall": round(terms["stall"], 4),
                 "active_layers": _active_layers(frame),
                 "game_tempo_scale": frame["game_tempo_scale"],

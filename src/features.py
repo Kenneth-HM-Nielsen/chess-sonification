@@ -159,6 +159,23 @@ def _material_balance(board: chess.Board) -> int:
     )
 
 
+def _material_total(board: chess.Board) -> int:
+    """All material still on the board, both colours, same weights.
+
+    Distinct from the balance: a queen-for-queen trade leaves the balance
+    untouched while taking eighteen points off the board, and it is the removal
+    that simplifies a position.
+    """
+    return sum(
+        value
+        * (
+            len(board.pieces(piece_type, chess.WHITE))
+            + len(board.pieces(piece_type, chess.BLACK))
+        )
+        for piece_type, value in PIECE_VALUES.items()
+    )
+
+
 def _centre_occupancy(board: chess.Board, color: chess.Color) -> int:
     """Pieces of `color` standing on d4, d5, e4 or e5."""
     return sum(
@@ -179,6 +196,7 @@ def board_features(board: chess.Board) -> dict:
         "king_pressure_w": _king_pressure(board, chess.WHITE),
         "king_pressure_b": _king_pressure(board, chess.BLACK),
         "material_balance": _material_balance(board),
+        "material_total": _material_total(board),
         "centre_occupancy_w": _centre_occupancy(board, chess.WHITE),
         "centre_occupancy_b": _centre_occupancy(board, chess.BLACK),
         "is_check": board.is_check(),

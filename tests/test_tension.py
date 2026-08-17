@@ -48,7 +48,7 @@ class Output(unittest.TestCase):
             if not path.exists():
                 path = pathlib.Path("data/pgn") / name
             if not path.exists():
-                continue
+                self.skipTest(f"fixture absent (gitignored): {name}")
             with self.subTest(game=name):
                 track = tension.tension_track(
                     features.annotate(ingest.ingest(path))
@@ -71,27 +71,39 @@ class Output(unittest.TestCase):
 class BudgetBinding(unittest.TestCase):
     """Behavioural, not a source scan: a computed key would escape a grep."""
 
+    @staticmethod
+    def _every_game():
+        """Every game available, so the check covers every code path.
+
+        A fixture with no captures, no pawn moves and no evaluations enters none
+        of the release branches and none of the eval term, so a read placed
+        there would go unnoticed.
+        """
+        paths = sorted(SYNTHETIC.glob("*.pgn"))
+        paths += sorted(pathlib.Path("data/pgn").glob("*.pgn"))
+        return paths
+
     def test_deleting_budget_changes_nothing(self):
-        frames = features.annotate(
-            ingest.ingest(SYNTHETIC / "on_pace_bounded.pgn")
-        )
-        baseline = tension.tension_track(copy.deepcopy(frames))
-        stripped = copy.deepcopy(frames)
-        for frame in stripped:
-            del frame["budget_w"]
-            del frame["budget_b"]
-        self.assertEqual(tension.tension_track(stripped), baseline)
+        for path in self._every_game():
+            with self.subTest(game=path.name):
+                frames = features.annotate(ingest.ingest(path))
+                baseline = tension.tension_track(copy.deepcopy(frames))
+                stripped = copy.deepcopy(frames)
+                for frame in stripped:
+                    del frame["budget_w"]
+                    del frame["budget_b"]
+                self.assertEqual(tension.tension_track(stripped), baseline)
 
     def test_corrupting_budget_changes_nothing(self):
-        frames = features.annotate(
-            ingest.ingest(SYNTHETIC / "on_pace_bounded.pgn")
-        )
-        baseline = tension.tension_track(copy.deepcopy(frames))
-        poisoned = copy.deepcopy(frames)
-        for frame in poisoned:
-            frame["budget_w"] = 99999.0
-            frame["budget_b"] = -1.0
-        self.assertEqual(tension.tension_track(poisoned), baseline)
+        for path in self._every_game():
+            with self.subTest(game=path.name):
+                frames = features.annotate(ingest.ingest(path))
+                baseline = tension.tension_track(copy.deepcopy(frames))
+                poisoned = copy.deepcopy(frames)
+                for frame in poisoned:
+                    frame["budget_w"] = 99999.0
+                    frame["budget_b"] = -1.0
+                self.assertEqual(tension.tension_track(poisoned), baseline)
 
 
 class Independence(unittest.TestCase):
@@ -140,18 +152,20 @@ class Independence(unittest.TestCase):
 
 
 class Accumulation(unittest.TestCase):
-    def test_tension_is_carried_not_recomputed(self):
-        """Two plies with identical features must not carry identical tension.
-
-        A knight shuffle repeats the same position, so a per-ply recomputation
-        would return the same number every time.
-        """
-        _, track = tracked(sans=shuffle_moves(12))
+    def test_tension_eases_toward_its_drive_rather_than_snapping_to_it(self):
+        """Hold every input constant: a carried value climbs, a recomputed one
+        arrives at full height on the first ply and stays there."""
+        frames, _ = tracked(sans=shuffle_moves(30))
+        for frame in frames:
+            frame["halfmove_clock"] = 30
+            frame["repetition_2"] = False
+        track = tension.tension_track(frames)
         values = [e["tension"] for e in track]
-        self.assertGreater(len(set(values)), 1)
-        # Monotone build while nothing releases.
-        rising = [b >= a for a, b in zip(values[1:5], values[2:6])]
-        self.assertTrue(all(rising), values)
+        ceiling = max(values)
+        self.assertGreater(ceiling, 0.0)
+        self.assertLess(values[0], 0.5 * ceiling)
+        self.assertLess(values[0], values[3])
+        self.assertLess(values[3], values[10])
 
     def test_stall_weighs_the_upper_range_more(self):
         """A counter at 45 is not twice a counter at 22."""
@@ -159,10 +173,50 @@ class Accumulation(unittest.TestCase):
         high = tension._stall({"halfmove_clock": 45, "repetition_2": False})
         self.assertGreater(high / low, 3.0)
 
-    def test_repetition_only_modifies_the_stall_term(self):
+    def test_repetition_lifts_the_stall_term_by_a_quarter(self):
+        """Pinned to a literal: comparing the constant to itself asserts nothing
+        and passes for 1.0, which removes the modifier the spec requires."""
+        self.assertEqual(tension.REPETITION_BOOST, 1.25)
         plain = tension._stall({"halfmove_clock": 20, "repetition_2": False})
         repeated = tension._stall({"halfmove_clock": 20, "repetition_2": True})
-        self.assertAlmostEqual(repeated, plain * tension.REPETITION_BOOST, places=6)
+        self.assertAlmostEqual(plain, 0.16, places=6)
+        self.assertAlmostEqual(repeated, 0.20, places=6)
+
+    def test_normalisers_are_pinned_to_their_measured_values(self):
+        """Every one of these was silently replaceable by any other number."""
+        self.assertEqual(tension.LOCKED_FULL, 6)
+        self.assertEqual(tension.PAWN_TENSION_FULL, 3)
+        self.assertEqual(tension.KING_PRESSURE_FULL, 8)
+        self.assertEqual(tension.MOBILITY_FULL, 80)
+        self.assertEqual(tension.EVAL_VOLATILITY_FULL, 150.0)
+        self.assertEqual(tension.EVAL_WINDOW, 4)
+        self.assertEqual(tension.STALL_SATURATION, 50)
+        self.assertEqual(tension.FORCING_STREAK_FULL, 3)
+        # and their consequences, so the constants are not merely recited
+        self.assertEqual(tension._structure(
+            {"locked_pawns": 6, "pawn_tension": 3}), 1.0)
+        self.assertEqual(tension._king(
+            {"king_pressure_w": 0, "king_pressure_b": 8}), 1.0)
+        self.assertEqual(tension._stall(
+            {"halfmove_clock": 50, "repetition_2": False}), 1.0)
+        self.assertAlmostEqual(tension._stall(
+            {"halfmove_clock": 25, "repetition_2": False}), 0.25, places=6)
+
+    def test_both_structural_terms_reach_tension(self):
+        """locked_pawns and pawn_tension are both primary structural terms."""
+        self.assertGreater(tension._structure(
+            {"locked_pawns": 0, "pawn_tension": 3}), 0.0)
+        self.assertGreater(tension._structure(
+            {"locked_pawns": 6, "pawn_tension": 0}), 0.0)
+
+    def test_king_pressure_reads_whichever_king_is_hotter(self):
+        """A king under attack is tension regardless of whose it is."""
+        self.assertEqual(
+            tension._king({"king_pressure_w": 8, "king_pressure_b": 0}),
+            tension._king({"king_pressure_w": 0, "king_pressure_b": 8}),
+        )
+        self.assertEqual(tension._king(
+            {"king_pressure_w": 8, "king_pressure_b": 0}), 1.0)
 
 
 class Cadence(unittest.TestCase):
@@ -213,6 +267,148 @@ class Cadence(unittest.TestCase):
         self.assertGreater(track[-2]["tension"], 0.0)
 
 
+class ReleaseEvents(unittest.TestCase):
+    """Each of the five, pinned. Deleting any one of them passed the suite."""
+
+    @staticmethod
+    def _events(sans, index):
+        frames = features.annotate(ingest.ingest(write_pgn(build_pgn(sans))))
+        return tension._release_events(frames[index], frames[:index],
+                                       index == len(frames) - 1)
+
+    def test_pawn_break(self):
+        frames = features.annotate(ingest.ingest(write_pgn(build_pgn(
+            shuffle_moves(4)))))
+        # A drop of two locked pawns in one ply is the break.
+        frames[2]["locked_pawns"] = 4
+        frames[3]["locked_pawns"] = 1
+        events = tension._release_events(frames[3], frames[:3], False)
+        self.assertIn("pawn_break", events)
+        frames[3]["locked_pawns"] = 3          # a drop of one is not
+        self.assertNotIn("pawn_break",
+                         tension._release_events(frames[3], frames[:3], False))
+
+    def test_progress_reset(self):
+        self.assertIn("progress_reset", self._events(["Nf3", "Nf6", "e4"], 2))
+        self.assertNotIn("progress_reset", self._events(["Nf3", "Nf6", "Ng1"], 2))
+
+    def test_simplification_on_a_queen_trade(self):
+        sans = ["e4", "d5", "exd5", "Qxd5", "Nc3", "Qe5+", "Qe2", "Qxe2+", "Bxe2"]
+        self.assertIn("simplification", self._events(sans, 8))
+
+    def test_simplification_ignores_an_even_trade_of_balance(self):
+        """The balance is unchanged by an even trade; the board is not.
+
+        Reading the balance instead of the material removed misses every trade
+        and fires on unanswered sacrifices instead.
+        """
+        frames = features.annotate(ingest.ingest(write_pgn(build_pgn(
+            ["e4", "d5", "exd5", "Qxd5", "Nc3", "Qe5+", "Qe2", "Qxe2+", "Bxe2"]))))
+        self.assertEqual(frames[6]["material_balance"],
+                         frames[8]["material_balance"])
+        self.assertGreaterEqual(
+            frames[6]["material_total"] - frames[8]["material_total"], 9)
+
+    def test_simplification_needs_a_capture(self):
+        """The quiet move after a recapture must not fire the same exchange."""
+        sans = ["e4", "d5", "exd5", "Qxd5", "Nc3", "Qe5+", "Qe2", "Qxe2+",
+                "Bxe2", "Nf6"]
+        self.assertNotIn("simplification", self._events(sans, 9))
+
+    def test_simplification_on_points_alone(self):
+        """The points threshold, exercised without a queen leaving the board.
+
+        A rook trade takes ten points off with both queens still on, so it can
+        only fire through the material rule.
+        """
+        frames = features.annotate(ingest.ingest(write_pgn(build_pgn(
+            shuffle_moves(4)))))
+        self.assertEqual(tension.SIMPLIFICATION_POINTS, 5)
+        frames[1]["material_total"] = 78
+        frames[3]["is_capture"] = True
+        frames[3]["material_total"] = 73          # five points off: fires
+        self.assertIn("simplification",
+                      tension._release_events(frames[3], frames[:3], False))
+        frames[3]["material_total"] = 74          # four points off: does not
+        self.assertNotIn("simplification",
+                         tension._release_events(frames[3], frames[:3], False))
+
+    def test_king_safety_needs_real_danger_not_just_a_big_drop(self):
+        """Two attackers falling to none is a drop, but was never danger."""
+        frames = features.annotate(ingest.ingest(write_pgn(build_pgn(
+            shuffle_moves(4)))))
+        frames[3]["color"] = "w"
+        frames[2]["king_pressure_w"] = tension.SHELTER_PRESSURE_FLOOR - 1
+        frames[3]["king_pressure_w"] = 0
+        self.assertNotIn("king_safety",
+                         tension._release_events(frames[3], frames[:3], False))
+        frames[2]["king_pressure_w"] = tension.SHELTER_PRESSURE_FLOOR
+        self.assertIn("king_safety",
+                      tension._release_events(frames[3], frames[:3], False))
+
+    def test_king_safety_on_castling(self):
+        sans = ["e4", "e5", "Nf3", "Nc6", "Bc4", "Bc5", "O-O"]
+        self.assertIn("king_safety", self._events(sans, 6))
+
+    def test_king_safety_ignores_ordinary_quiet_moves(self):
+        """Without a floor and a real drop this fires on endgame shuffling."""
+        frames = features.annotate(ingest.ingest(write_pgn(build_pgn(
+            shuffle_moves(4)))))
+        frames[2]["king_pressure_w"] = 2       # never in real danger
+        frames[3]["king_pressure_w"] = 1
+        frames[3]["color"] = "w"
+        self.assertNotIn("king_safety",
+                         tension._release_events(frames[3], frames[:3], False))
+        frames[2]["king_pressure_w"] = 4       # real danger, real escape
+        frames[3]["king_pressure_w"] = 1
+        self.assertIn("king_safety",
+                      tension._release_events(frames[3], frames[:3], False))
+
+    def test_termination_on_the_final_ply_only(self):
+        frames = features.annotate(ingest.ingest(write_pgn(build_pgn(
+            shuffle_moves(6)))))
+        self.assertIn("termination",
+                      tension._release_events(frames[5], frames[:5], True))
+        self.assertNotIn("termination",
+                         tension._release_events(frames[4], frames[:4], False))
+
+    def test_queens_are_counted_on_the_board_not_in_the_castling_field(self):
+        """`Q` in a full FEN also spells queenside castling rights."""
+        self.assertEqual(tension._queens("4k2r/8/8/8/8/8/8/R3K3 b Qk - 10 20"), 0)
+        self.assertEqual(tension._queens("3qk3/8/8/8/8/8/8/3QK3 w KQkq - 0 1"), 2)
+
+    def test_each_event_discharges_a_different_share(self):
+        self.assertEqual(tension.RELEASE_DEPTH["termination"], 1.0)
+        for event in ("pawn_break", "progress_reset", "simplification",
+                      "king_safety"):
+            with self.subTest(event=event):
+                self.assertGreater(tension.RELEASE_DEPTH[event], 0.0)
+                self.assertLess(tension.RELEASE_DEPTH[event], 1.0)
+
+
+class Plotting(unittest.TestCase):
+    def test_plot_track_writes_a_figure(self):
+        import tempfile
+
+        _, track = tracked(
+            sans=shuffle_moves(10),
+            clocks=clocks_from_think([0, 0] + [1.0] * 8, start=600),
+            time_control="600",
+        )
+        out = pathlib.Path(tempfile.mkdtemp()) / "game_tension.png"
+        tension.plot_track(track, out)
+        self.assertTrue(out.exists())
+        self.assertGreater(out.stat().st_size, 1000)
+
+    def test_plot_track_survives_a_game_with_no_clocks(self):
+        import tempfile
+
+        _, track = tracked(sans=shuffle_moves(10))
+        out = pathlib.Path(tempfile.mkdtemp()) / "bare_tension.png"
+        tension.plot_track(track, out)
+        self.assertTrue(out.exists())
+
+
 class MissingEvaluations(unittest.TestCase):
     def test_absence_is_not_the_same_as_a_calm_evaluation(self):
         """Renormalising gives the surviving terms more weight, by design.
@@ -261,6 +457,26 @@ class DensityAndMeter(unittest.TestCase):
     def test_meter_is_dotted_only_on_a_forcing_streak(self):
         _, track = tracked(sans=shuffle_moves(8))
         self.assertTrue(all(e["meter"] == "free" for e in track))
+
+    def test_every_kind_of_forcing_move_counts(self):
+        """Checks and forced replies are forcing, not only captures."""
+        for flags in ({"is_check": True}, {"is_capture": True},
+                      {"forced": True}):
+            with self.subTest(**flags):
+                frame = {"is_check": False, "is_capture": False, "forced": False}
+                frame.update(flags)
+                self.assertTrue(tension._is_forcing(frame))
+        self.assertFalse(tension._is_forcing(
+            {"is_check": False, "is_capture": False, "forced": False}))
+
+    def test_a_check_sequence_turns_the_meter_dotted(self):
+        frames, _ = tracked(sans=shuffle_moves(6))
+        for frame in frames[2:5]:
+            frame["is_check"] = True
+        track = tension.tension_track(frames)
+        self.assertEqual(track[2]["meter"], "free")
+        self.assertEqual(track[3]["meter"], "dotted")
+        self.assertEqual(track[4]["meter"], "dotted")
 
     def test_a_capture_sequence_turns_the_meter_dotted(self):
         _, track = tracked(sans=["e4", "d5", "exd5", "Qxd5"])
