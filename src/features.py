@@ -244,10 +244,31 @@ def board_features(board: chess.Board) -> dict:
     }
 
 
+def _captured_value(board_before: chess.Board, move: chess.Move) -> int:
+    """Value of the piece this move takes off the board, 0 for a quiet move.
+
+    Read from the position rather than differenced out of `material_total`,
+    because a capturing promotion moves the total in two directions at once:
+    axb8=Q takes five points of rook off and puts eight points of queen on, so
+    the difference is +3 where the capture is 5.
+
+    Distinct from the `simplification` release in the tension layer, which
+    measures material removed across a whole exchange -- an even trade leaves the
+    balance where it was while emptying the board, and that is a different
+    question from what this one move took.
+    """
+    if board_before.is_en_passant(move):
+        return PIECE_VALUES[chess.PAWN]
+    captured = board_before.piece_at(move.to_square)
+    # A king is never among them: the move has already been checked legal.
+    return PIECE_VALUES[captured.piece_type] if captured else 0
+
+
 def move_features(board_before: chess.Board, move: chess.Move) -> dict:
     """Measurements that need the move and the position it was played from."""
     return {
         "is_capture": board_before.is_capture(move),
+        "captured_value": _captured_value(board_before, move),
         "is_promotion": move.promotion is not None,
         "forced": board_before.legal_moves.count() == 1,
     }

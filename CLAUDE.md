@@ -7,7 +7,7 @@ Read this first, every session. Then read the current phase spec,
 counts against the actual code, and correct this file where it has drifted. Do
 not assume a file exists because it is named here.
 
-*Last reconciled against the repo at `5da42b6` (start of CCI 4.1).*
+*Last reconciled against the repo at `9694c51` (CCI 4.1, Part A complete).*
 
 ---
 
@@ -169,6 +169,12 @@ wherever it governs.
 | `STALL_SATURATION` | 50 | `tension` |
 | `DENSITY_MOBILITY_SHARE` | 0.55 | `tension` |
 
+Render constants are not calibration in the same sense — they are musical
+choices, and they belong to `render` alone. The ones a listening gate can move
+are `CYMBAL_*`, `TIMPANI_*`, `PAN_COLOUR`, `CUTOFF_HARMONIC` and `STEP_SECONDS`.
+Every mapping they carry is pinned behaviourally, so flattening one fails the
+suite rather than going quiet.
+
 ---
 
 ## Engineering discipline
@@ -228,11 +234,19 @@ Update this section at the end of every phase.
   superseded and its spectra have been deleted; its listening gate was never
   returned. What survived 4a is named in that spec: pitch-relative lowpass,
   fade after filtering, and the separation-floor harness.
+  **B1 (percussion) is built and awaiting Kenneth's listening gate.** Cymbal on
+  captures scaled by `captured_value`; timpani roll driven by `stall`, rate by
+  `tension`, pitched to `BASE_MIDI`. `tools/demo.py` produces the gate artifacts.
+  B2 onward is unbuilt, so a render currently carries percussion and no voices.
 - **Phase 5 (CLI)** — complete. `render`, `frames` and `plot` exist and work.
 - **Web app** — not started. Its spec will be written when the phase begins.
 
-170 tests, green. `tests/fixtures/` holds 7 committed synthetic games;
+220 tests, green. `tests/fixtures/` holds 7 committed synthetic games;
 `data/pgn/` holds 9 real games locally and is gitignored.
+
+Listening-gate artifacts come from `tools/demo.py`, which is committed so a gate
+can be re-run against the same command rather than a remembered one-off. Its
+output lands in gitignored `out/`.
 
 ---
 
