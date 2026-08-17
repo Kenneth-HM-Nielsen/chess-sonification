@@ -38,6 +38,10 @@ PIECE_VALUES = {
 
 CENTRE_SQUARES = (chess.D4, chess.D5, chess.E4, chess.E5)
 
+# A king can capture but can never be traded, so as an attacker it is never the
+# cheap one. Only the first test -- outnumbered -- can catch a piece a king takes.
+ATTACKER_VALUES = {**PIECE_VALUES, chess.KING: 1000}
+
 # Moves assumed to lie ahead where the rules bound nothing: a prior on game
 # length, not a rule. It sets both the opening allowance and the running budget,
 # so pressure is zero at move one by construction and measures how far behind
@@ -159,6 +163,36 @@ def _material_balance(board: chess.Board) -> int:
     )
 
 
+def _hanging_material(board: chess.Board) -> int:
+    """Value of every loose piece on the board, both colours.
+
+    A piece is loose when more enemies attack its square than friends defend it,
+    or when the cheapest attacker is worth less than the piece — the two ways a
+    tactic gets started. Deliberately transient rather than a material count: a
+    gambit is a pawn down permanently, but what makes it sharp is that pieces are
+    hanging *now*. A settled queen-versus-rook endgame reads near zero, where an
+    imbalance measure would read maximal for ninety plies on a decided verdict.
+
+    Loose pieces are what tactics operate on, which makes this the honest
+    engine-free proxy for something being about to happen.
+    """
+    loose = 0
+    for square, piece in board.piece_map().items():
+        if piece.piece_type == chess.KING:
+            continue
+        attackers = board.attackers(not piece.color, square)
+        if not attackers:
+            continue
+        defenders = board.attackers(piece.color, square)
+        value = PIECE_VALUES[piece.piece_type]
+        cheapest = min(
+            ATTACKER_VALUES[board.piece_type_at(attacker)] for attacker in attackers
+        )
+        if len(attackers) > len(defenders) or cheapest < value:
+            loose += value
+    return loose
+
+
 def _material_total(board: chess.Board) -> int:
     """All material still on the board, both colours, same weights.
 
@@ -197,6 +231,7 @@ def board_features(board: chess.Board) -> dict:
         "king_pressure_b": _king_pressure(board, chess.BLACK),
         "material_balance": _material_balance(board),
         "material_total": _material_total(board),
+        "hanging_material": _hanging_material(board),
         "centre_occupancy_w": _centre_occupancy(board, chess.WHITE),
         "centre_occupancy_b": _centre_occupancy(board, chess.BLACK),
         "is_check": board.is_check(),

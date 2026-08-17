@@ -177,6 +177,8 @@ def ingest(pgn_path: Path) -> list[dict]:
     time_control = game.headers.get("TimeControl")
     periods = parse_time_control(time_control)
     start_fen = game.board().fen()
+    result = game.headers.get("Result")
+    termination = game.headers.get("Termination")
     # Without a usable allocation there is no way to tell an instant reply from a
     # bulk credit, so unexplained clock rises are reported as unknown, not zero.
     allocation_known = any(base is not None for _moves, base, _inc in periods)
@@ -271,6 +273,8 @@ def ingest(pgn_path: Path) -> list[dict]:
                 # standard one.
                 "time_control": time_control,
                 "start_fen": start_fen,
+                "result": result,
+                "termination": termination,
                 "eval_cp": _eval_cp(node),
                 "fen_after": board.fen(),
             }

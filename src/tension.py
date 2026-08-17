@@ -32,6 +32,7 @@ from collections import deque
 LOCKED_FULL = 6
 PAWN_TENSION_FULL = 3
 KING_PRESSURE_FULL = 8
+HANGING_FULL = 12
 MOBILITY_FULL = 80
 EVAL_VOLATILITY_FULL = 150.0
 EVAL_WINDOW = 4
@@ -59,10 +60,11 @@ ATTACK = 0.12
 STRUCTURE_LOCKED_SHARE = 0.65
 
 WEIGHTS = {
-    "structure": 0.34,
-    "king": 0.22,
-    "stall": 0.28,
-    "eval": 0.16,
+    "structure": 0.30,
+    "stall": 0.24,
+    "king": 0.18,
+    "hanging": 0.14,
+    "eval": 0.14,
 }
 
 # How much of the accumulated tension each kind of event discharges.
@@ -73,6 +75,13 @@ RELEASE_DEPTH = {
     "king_safety": 0.40,
     "termination": 1.0,
 }
+
+# Chosen once, after the hanging-material term landed, against the corpus below.
+# The median ply moves from 0.06 to 0.24 and the share sitting under 0.05 falls
+# from 43% to 4%, while the most locked game reaches 0.69 and leaves headroom.
+GAMMA = 0.5
+
+DECISIVE_RESULTS = ("1-0", "0-1")
 
 PAWN_BREAK_DROP = 2
 SIMPLIFICATION_POINTS = 5
@@ -91,6 +100,22 @@ def _clamp(value: float) -> float:
     return 0.0 if value < 0.0 else 1.0 if value > 1.0 else value
 
 
+def _calibrate(value: float) -> float:
+    """Spread the raw scale over the range the axis is defined on.
+
+    The terms combine to a weighted mean, so a real game lands low even when it
+    is tense: before this, nearly half of all plies in the corpus sat under 0.05
+    and the axis was not calibrated to its own definition. One global exponent,
+    identical for every game, applied at emission only -- the carried value stays
+    raw so the dynamics are untouched. Monotone, so the ordering across games is
+    exactly preserved and no game is rescaled against itself.
+
+    Calibrated against an eight-game corpus. That makes it a calibration, not a
+    law; deciding what the number sounds like remains the renderer's business.
+    """
+    return _clamp(value) ** GAMMA
+
+
 def _structure(frame: dict) -> float:
     locked = _clamp(frame["locked_pawns"] / LOCKED_FULL)
     contact = _clamp(frame["pawn_tension"] / PAWN_TENSION_FULL)
@@ -102,6 +127,16 @@ def _king(frame: dict) -> float:
     is tension regardless of who stands better."""
     worst = max(frame["king_pressure_w"], frame["king_pressure_b"])
     return _clamp(worst / KING_PRESSURE_FULL)
+
+
+def _hanging(frame: dict) -> float:
+    """Loose material, the transient half of tactical volatility.
+
+    Structure, stall and king heat all read near zero in an open gambit, whose
+    whole content is that pieces are hanging. Without this the axis cannot say
+    "sharp attack" at all.
+    """
+    return _clamp(frame["hanging_material"] / HANGING_FULL)
 
 
 def _stall(frame: dict) -> float:
@@ -163,31 +198,42 @@ def _release_events(frame: dict, history: list[dict], is_last: bool) -> list[str
         if frame["san"].startswith("O-O") or escaped:
             events.append("king_safety")
 
-    if is_last:
+    if is_last and frame.get("result") in DECISIVE_RESULTS:
+        # Only a decisive game resolves. A draw is a failure to resolve and an
+        # unfinished game is an absence, and forcing a release onto either would
+        # say something the game did not.
         events.append("termination")
     return events
 
 
-def _active_layers(frame: dict) -> list[str]:
+def _active_layers(frames: list[dict]) -> list[str]:
+    """Which signals this *game* carried, for the badge the web app shows.
+
+    A manifest, not a per-ply flag: per-ply availability is already `think_time`
+    and `decision_state`, and saying it twice made the layer appear to switch on
+    and off dozens of times because individual replies were premoves.
+    """
     layers = ["board"]
-    if frame["eval_cp"] is not None:
+    if any(frame["eval_cp"] is not None for frame in frames):
         layers.append("eval")
-    if frame["time_pressure_w"] is not None or frame["time_pressure_b"] is not None:
+    if any(frame["time_pressure_w"] is not None
+           or frame["time_pressure_b"] is not None for frame in frames):
         layers.append("pressure")
-    if frame["think_relative"] is not None:
+    if any(frame["think_relative"] is not None for frame in frames):
         layers.append("think")
     return layers
 
 
-def tension_track(frames: list[dict]) -> list[dict]:
-    """Single stateful pass over frames, emitting per-ply state.
+def tension_track(frames: list[dict]) -> dict:
+    """Single stateful pass over frames, emitting the state track.
 
-    Each entry carries `tension`, `pressure_w`, `pressure_b`, `density`, `meter`,
-    `cadence_strength`, `stall`, `active_layers` and `game_tempo_scale`.
+    Two scopes. Per game: `game_tempo_scale` and `active_layers`. Per ply, under
+    `plies`: `tension`, `pressure_w`, `pressure_b`, `density`, `meter`,
+    `cadence_strength` and `stall`.
     """
-    track: list[dict] = []
+    plies: list[dict] = []
     if not frames:
-        return track
+        return {"game_tempo_scale": None, "active_layers": [], "plies": plies}
 
     tension = 0.0
     forcing_streak = 0
@@ -200,6 +246,7 @@ def tension_track(frames: list[dict]) -> list[dict]:
             "structure": _structure(frame),
             "king": _king(frame),
             "stall": _stall(frame),
+            "hanging": _hanging(frame),
         }
         if frame["eval_cp"] is not None:
             evals.append(frame["eval_cp"])
@@ -225,26 +272,28 @@ def tension_track(frames: list[dict]) -> list[dict]:
 
         forcing_streak = forcing_streak + 1 if _is_forcing(frame) else 0
 
-        track.append(
+        plies.append(
             {
                 "ply": frame["ply"],
-                "tension": round(_clamp(tension), 4),
+                "tension": round(_calibrate(tension), 4),
                 "pressure_w": frame["time_pressure_w"],
                 "pressure_b": frame["time_pressure_b"],
                 "density": round(_density(frame, forcing_streak), 4),
                 "meter": "dotted" if forcing_streak >= DOTTED_STREAK else "free",
-                "cadence_strength": round(cadence_strength, 6),
+                "cadence_strength": round(_calibrate(cadence_strength), 6),
                 "stall": round(terms["stall"], 4),
-                "active_layers": _active_layers(frame),
-                "game_tempo_scale": frame["game_tempo_scale"],
             }
         )
         history.append(frame)
 
-    return track
+    return {
+        "game_tempo_scale": frames[0]["game_tempo_scale"],
+        "active_layers": _active_layers(frames),
+        "plies": plies,
+    }
 
 
-def plot_track(track: list[dict], out_path) -> None:
+def plot_track(track: dict, out_path) -> None:
     """Plot the state track and save it."""
     import matplotlib
 
@@ -253,14 +302,15 @@ def plot_track(track: list[dict], out_path) -> None:
 
     surface, ink, ink2, grid = "#fcfcfb", "#0b0b0b", "#52514e", "#e2e1dd"
     series = ("#2a78d6", "#eb6834", "#1baf7a")
-    moves = [(entry["ply"] + 1) / 2 for entry in track]
+    entries = track["plies"]
+    moves = [(entry["ply"] + 1) / 2 for entry in entries]
 
     figure, axes = plt.subplots(3, 1, figsize=(12, 7.5), sharex=True,
                                 gridspec_kw={"hspace": 0.2})
     figure.patch.set_facecolor(surface)
 
-    axes[0].plot(moves, [e["tension"] for e in track], color=series[0], lw=1.8)
-    cadences = [(m, e) for m, e in zip(moves, track) if e["cadence_strength"] > 0]
+    axes[0].plot(moves, [e["tension"] for e in entries], color=series[0], lw=1.8)
+    cadences = [(m, e) for m, e in zip(moves, entries) if e["cadence_strength"] > 0]
     if cadences:
         axes[0].scatter(
             [m for m, _ in cadences],
@@ -272,12 +322,12 @@ def plot_track(track: list[dict], out_path) -> None:
     axes[0].set_ylim(-0.03, 1.03)
 
     for side, colour, label in (("w", series[0], "White"), ("b", series[1], "Black")):
-        points = [(m, e[f"pressure_{side}"]) for m, e in zip(moves, track)
+        points = [(m, e[f"pressure_{side}"]) for m, e in zip(moves, entries)
                   if e[f"pressure_{side}"] is not None]
         if points:
             axes[1].plot([m for m, _ in points], [v for _, v in points],
                          color=colour, lw=1.5, label=label)
-    if any(e["pressure_w"] is not None for e in track):
+    if any(e["pressure_w"] is not None for e in entries):
         axes[1].legend(frameon=False, fontsize=9, labelcolor=ink2, loc="upper left")
     else:
         axes[1].annotate("no clock data — pressure layer off", xy=(0.015, 0.5),
@@ -285,8 +335,8 @@ def plot_track(track: list[dict], out_path) -> None:
     axes[1].set_ylabel("pressure", fontsize=9.5, color=ink2)
     axes[1].set_ylim(-0.03, 1.03)
 
-    axes[2].plot(moves, [e["density"] for e in track], color=series[2], lw=1.5)
-    dotted = [m for m, e in zip(moves, track) if e["meter"] == "dotted"]
+    axes[2].plot(moves, [e["density"] for e in entries], color=series[2], lw=1.5)
+    dotted = [m for m, e in zip(moves, entries) if e["meter"] == "dotted"]
     for move in dotted:
         axes[2].axvline(move, color=ink2, lw=0.6, alpha=0.18)
     axes[2].set_ylabel("density", fontsize=9.5, color=ink2)

@@ -77,3 +77,26 @@ a poor measure of how tense things are.
 A suite whose fixtures are gitignored reports green on a fresh clone while
 verifying nothing. Either commit fixtures the tests can rely on, or make the
 runner name every skip and fail under `--strict`. Both, here.
+
+## A behavioural test must be shown to enter the branches it guards
+
+A test that never reaches the code it exists to protect is a green light wired to
+nothing. Run it over the whole fixture corpus, not the smallest case that makes
+it pass, and check which branches it actually enters before trusting it.
+
+The binding test for "the tension layer must not read `budget`" deleted those
+fields and required an identical track. Sound in design — a source scan cannot
+catch a computed key, this can — but it ran on a single sixty-ply knight shuffle
+with no captures, no pawn moves and no evaluations. It therefore entered none of
+the four release branches and none of the evaluation term, and this passed the
+whole suite:
+
+```python
+if "eval" in terms:
+    key = "bud" + "get_" + frame["color"]      # invisible to an AST scan
+    terms["eval"] = _clamp(terms["eval"] + frame[key] / 1000.0)
+```
+
+Running the same test over every fixture catches it immediately. The related
+habit: when a mutation survives, the finding is usually not "add a test" but
+"the test you have never runs that line".

@@ -12,6 +12,8 @@ import logging
 import pathlib
 import unittest
 
+import chess
+
 from src import features, ingest, tension
 from tests.helpers import build_pgn, clocks_from_think, shuffle_moves, write_pgn
 
@@ -19,21 +21,30 @@ logging.getLogger("src.ingest").setLevel(logging.CRITICAL)
 
 SYNTHETIC = pathlib.Path(__file__).parent / "fixtures"
 
-STATE_FIELDS = {
+PLY_FIELDS = {
     "ply", "tension", "pressure_w", "pressure_b", "density", "meter",
-    "cadence_strength", "stall", "active_layers", "game_tempo_scale",
+    "cadence_strength", "stall",
 }
+GAME_FIELDS = {"game_tempo_scale", "active_layers", "plies"}
 
 
 def tracked(**kwargs):
+    """Frames and the per-ply entries. Most checks are per ply."""
     frames = features.annotate(ingest.ingest(write_pgn(build_pgn(**kwargs))))
-    return frames, tension.tension_track(frames)
+    return frames, tension.tension_track(frames)["plies"]
+
+
+def record(**kwargs):
+    """The whole two-scope record, for the per-game checks."""
+    frames = features.annotate(ingest.ingest(write_pgn(build_pgn(**kwargs))))
+    return tension.tension_track(frames)
 
 
 class Output(unittest.TestCase):
     def test_emits_exactly_the_specified_state(self):
-        _, track = tracked(sans=shuffle_moves(6))
-        self.assertEqual(set(track[0]), STATE_FIELDS)
+        whole = record(sans=shuffle_moves(6))
+        self.assertEqual(set(whole), GAME_FIELDS)
+        self.assertEqual(set(whole["plies"][0]), PLY_FIELDS)
 
     def test_emits_no_musical_parameters(self):
         """Mapping state onto sound belongs to render, not here."""
@@ -52,14 +63,17 @@ class Output(unittest.TestCase):
             with self.subTest(game=name):
                 track = tension.tension_track(
                     features.annotate(ingest.ingest(path))
-                )
+                )["plies"]
                 for entry in track:
                     for field in ("tension", "density", "cadence_strength", "stall"):
                         self.assertGreaterEqual(entry[field], 0.0)
                         self.assertLessEqual(entry[field], 1.0)
 
     def test_empty_frames(self):
-        self.assertEqual(tension.tension_track([]), [])
+        self.assertEqual(
+            tension.tension_track([]),
+            {"game_tempo_scale": None, "active_layers": [], "plies": []},
+        )
 
     def test_does_not_mutate_the_frames(self):
         frames, _ = tracked(sans=shuffle_moves(8))
@@ -114,7 +128,7 @@ class Independence(unittest.TestCase):
         for frame in altered:
             frame["mobility_w"] = 1
             frame["mobility_b"] = 1
-        changed = tension.tension_track(altered)
+        changed = tension.tension_track(altered)["plies"]
         self.assertEqual([e["tension"] for e in changed],
                          [e["tension"] for e in baseline])
         self.assertNotEqual([e["density"] for e in changed],
@@ -130,7 +144,7 @@ class Independence(unittest.TestCase):
         for frame in altered:
             frame["time_pressure_w"] = 1.0
             frame["time_pressure_b"] = 1.0
-        changed = tension.tension_track(altered)
+        changed = tension.tension_track(altered)["plies"]
         self.assertEqual([e["tension"] for e in changed],
                          [e["tension"] for e in baseline])
 
@@ -148,7 +162,7 @@ class Independence(unittest.TestCase):
         _, track = tracked(sans=shuffle_moves(8))
         self.assertTrue(all(e["pressure_w"] is None for e in track))
         self.assertTrue(all(e["pressure_b"] is None for e in track))
-        self.assertNotIn("pressure", track[0]["active_layers"])
+        self.assertNotIn("pressure", record(sans=shuffle_moves(8))["active_layers"])
 
 
 class Accumulation(unittest.TestCase):
@@ -159,7 +173,7 @@ class Accumulation(unittest.TestCase):
         for frame in frames:
             frame["halfmove_clock"] = 30
             frame["repetition_2"] = False
-        track = tension.tension_track(frames)
+        track = tension.tension_track(frames)["plies"]
         values = [e["tension"] for e in track]
         ceiling = max(values)
         self.assertGreater(ceiling, 0.0)
@@ -225,7 +239,7 @@ class Cadence(unittest.TestCase):
 
         Only the final ply may cadence, and only because the game ends.
         """
-        _, track = tracked(sans=shuffle_moves(20))
+        _, track = tracked(sans=shuffle_moves(20), result="1-0")
         fired = [e for e in track[:-1] if e["cadence_strength"] > 0]
         self.assertEqual(fired, [])
         self.assertGreater(track[-1]["cadence_strength"], 0.0)
@@ -241,8 +255,10 @@ class Cadence(unittest.TestCase):
         """The same event released from a greater height is a greater event."""
         shallow = self._break_after(2)
         deep = self._break_after(30)
+        # The emitted axis is the square root of the raw one, so a fourfold
+        # difference in accumulated height reads as twofold here.
         self.assertGreater(deep["cadence_strength"],
-                           shallow["cadence_strength"] * 2)
+                           shallow["cadence_strength"] * 1.5)
 
     def test_strength_is_not_boolean(self):
         """Three identical events at rising heights must read as three sizes.
@@ -262,7 +278,7 @@ class Cadence(unittest.TestCase):
 
     def test_termination_discharges_completely(self):
         """The final release is total, so the last ply reads zero."""
-        _, track = tracked(sans=shuffle_moves(20))
+        _, track = tracked(sans=shuffle_moves(20), result="1-0")
         self.assertEqual(track[-1]["tension"], 0.0)
         self.assertGreater(track[-2]["tension"], 0.0)
 
@@ -366,7 +382,7 @@ class ReleaseEvents(unittest.TestCase):
 
     def test_termination_on_the_final_ply_only(self):
         frames = features.annotate(ingest.ingest(write_pgn(build_pgn(
-            shuffle_moves(6)))))
+            shuffle_moves(6), result="1-0"))))
         self.assertIn("termination",
                       tension._release_events(frames[5], frames[:5], True))
         self.assertNotIn("termination",
@@ -377,6 +393,40 @@ class ReleaseEvents(unittest.TestCase):
         self.assertEqual(tension._queens("4k2r/8/8/8/8/8/8/R3K3 b Qk - 10 20"), 0)
         self.assertEqual(tension._queens("3qk3/8/8/8/8/8/8/3QK3 w KQkq - 0 1"), 2)
 
+    def test_a_draw_does_not_resolve(self):
+        """A draw is a failure to resolve; forcing a release onto it would say
+        something the game did not."""
+        _, drawn = tracked(sans=shuffle_moves(20), result="1/2-1/2")
+        self.assertEqual(drawn[-1]["cadence_strength"], 0.0)
+        self.assertGreater(drawn[-1]["tension"], 0.0)
+
+        _, decisive = tracked(sans=shuffle_moves(20), result="1-0")
+        self.assertGreater(decisive[-1]["cadence_strength"], 0.0)
+        self.assertEqual(decisive[-1]["tension"], 0.0)
+
+    def test_an_unfinished_game_does_not_resolve(self):
+        _, open_ended = tracked(sans=shuffle_moves(20), result="*")
+        self.assertEqual(open_ended[-1]["cadence_strength"], 0.0)
+        self.assertGreater(open_ended[-1]["tension"], 0.0)
+
+    def test_both_decisive_results_resolve(self):
+        for result in ("1-0", "0-1"):
+            with self.subTest(result=result):
+                _, track = tracked(sans=shuffle_moves(12), result=result)
+                self.assertGreater(track[-1]["cadence_strength"], 0.0)
+
+    @unittest.skipUnless(
+        (pathlib.Path("data/pgn") / "spassky_petrosian_1969_closed.pgn").exists(),
+        "real-game fixture absent from data/pgn (gitignored): "
+        "spassky_petrosian_1969_closed.pgn",
+    )
+    def test_a_real_drawn_game_ends_unresolved(self):
+        frames = features.annotate(ingest.ingest(
+            pathlib.Path("data/pgn") / "spassky_petrosian_1969_closed.pgn"))
+        self.assertEqual(frames[0]["result"], "1/2-1/2")
+        track = tension.tension_track(frames)["plies"]
+        self.assertEqual(track[-1]["cadence_strength"], 0.0)
+
     def test_each_event_discharges_a_different_share(self):
         self.assertEqual(tension.RELEASE_DEPTH["termination"], 1.0)
         for event in ("pawn_break", "progress_reset", "simplification",
@@ -386,11 +436,52 @@ class ReleaseEvents(unittest.TestCase):
                 self.assertLess(tension.RELEASE_DEPTH[event], 1.0)
 
 
+class Calibration(unittest.TestCase):
+    """One global monotone transform, chosen once and frozen."""
+
+    def test_gamma_is_pinned_and_actually_transforms(self):
+        self.assertEqual(tension.GAMMA, 0.5)
+        self.assertNotEqual(tension.GAMMA, 1.0)
+        self.assertAlmostEqual(tension._calibrate(0.25), 0.5, places=6)
+        self.assertAlmostEqual(tension._calibrate(0.04), 0.2, places=6)
+
+    def test_the_transform_is_monotone(self):
+        rising = [tension._calibrate(v / 50) for v in range(51)]
+        self.assertEqual(rising, sorted(rising))
+        self.assertEqual(tension._calibrate(0.0), 0.0)
+        self.assertEqual(tension._calibrate(1.0), 1.0)
+
+    def test_it_lifts_the_low_end_rather_than_the_high(self):
+        self.assertGreater(tension._calibrate(0.04) / 0.04, 4.0)
+        self.assertLess(tension._calibrate(0.81) / 0.81, 1.2)
+
+    @unittest.skipUnless(
+        len(list(pathlib.Path("data/pgn").glob("*.pgn"))) >= 4,
+        "real-game fixtures absent from data/pgn (gitignored)",
+    )
+    def test_the_corpus_ordering_survives_the_transform(self):
+        """Monotone means no game overtakes another. Rescaling per game would
+        make the Benoni and the Evans sound alike, which is the failure the axis
+        exists to prevent."""
+        order = ["spassky_petrosian_1969_closed.pgn", "karpov_kasparov_1991_kid.pgn",
+                 "wc2021_game6.pgn", "kasparov_anand_1995_evans.pgn"]
+        peaks = []
+        for name in order:
+            path = pathlib.Path("data/pgn") / name
+            if not path.exists():
+                self.skipTest(f"fixture absent (gitignored): {name}")
+            track = tension.tension_track(
+                features.annotate(ingest.ingest(path)))["plies"]
+            peaks.append(max(e["tension"] for e in track))
+        self.assertEqual(peaks, sorted(peaks, reverse=True), dict(zip(order, peaks)))
+        self.assertGreater(peaks[-1], 0.2)      # the Evans is no longer silent
+
+
 class Plotting(unittest.TestCase):
     def test_plot_track_writes_a_figure(self):
         import tempfile
 
-        _, track = tracked(
+        track = record(
             sans=shuffle_moves(10),
             clocks=clocks_from_think([0, 0] + [1.0] * 8, start=600),
             time_control="600",
@@ -403,7 +494,7 @@ class Plotting(unittest.TestCase):
     def test_plot_track_survives_a_game_with_no_clocks(self):
         import tempfile
 
-        _, track = tracked(sans=shuffle_moves(10))
+        track = record(sans=shuffle_moves(10))
         out = pathlib.Path(tempfile.mkdtemp()) / "bare_tension.png"
         tension.plot_track(track, out)
         self.assertTrue(out.exists())
@@ -418,16 +509,17 @@ class MissingEvaluations(unittest.TestCase):
         remaining terms carry the whole scale instead.
         """
         sans = shuffle_moves(12)
-        _, without = tracked(sans=sans)
-        _, calm = tracked(sans=sans, evals=["0.0"] * 12)
-        self.assertNotIn("eval", without[0]["active_layers"])
-        self.assertIn("eval", calm[-1]["active_layers"])
+        bare = record(sans=sans)
+        annotated_eval = record(sans=sans, evals=["0.0"] * 12)
+        self.assertNotIn("eval", bare["active_layers"])
+        self.assertIn("eval", annotated_eval["active_layers"])
 
-        peak_without = max(e["tension"] for e in without)
-        peak_calm = max(e["tension"] for e in calm)
+        peak_without = max(e["tension"] for e in bare["plies"])
+        peak_calm = max(e["tension"] for e in annotated_eval["plies"])
         self.assertGreater(peak_without, peak_calm)
-        expected = 1.0 / (1.0 - tension.WEIGHTS["eval"])
-        self.assertAlmostEqual(peak_without / peak_calm, expected, places=1)
+        # Raw ratio is 1/(1 - w_eval); the emitted axis is its square root.
+        expected = (1.0 / (1.0 - tension.WEIGHTS["eval"])) ** tension.GAMMA
+        self.assertAlmostEqual(peak_without / peak_calm, expected, places=2)
 
     def test_a_game_with_no_evaluations_is_still_coherent(self):
         """Three of eight fixtures have neither clocks nor evaluations."""
@@ -435,13 +527,14 @@ class MissingEvaluations(unittest.TestCase):
         if not path.exists():
             self.skipTest("real-game fixture absent from data/pgn (gitignored): "
                           "kasparov_topalov_1999.pgn")
-        track = tension.tension_track(features.annotate(ingest.ingest(path)))
+        whole = tension.tension_track(features.annotate(ingest.ingest(path)))
+        track = whole["plies"]
         values = [e["tension"] for e in track]
         self.assertGreater(max(values), 0.0)
         self.assertGreater(len(set(values)), len(values) // 4)
         self.assertTrue(all(0.0 <= v <= 1.0 for v in values))
         self.assertTrue(any(e["cadence_strength"] > 0 for e in track))
-        self.assertEqual(track[0]["active_layers"], ["board"])
+        self.assertEqual(whole["active_layers"], ["board"])
 
     def test_volatile_evaluations_raise_tension(self):
         sans = shuffle_moves(12)
@@ -451,6 +544,45 @@ class MissingEvaluations(unittest.TestCase):
                                                   -5, 5, -5, 5, -5, 5)])
         self.assertGreater(max(e["tension"] for e in wild),
                            max(e["tension"] for e in calm))
+
+
+class HangingMaterial(unittest.TestCase):
+    """The fifth source: the transient half of tactical volatility."""
+
+    def test_a_defended_piece_is_not_loose(self):
+        # Knight on f3 attacked by nothing.
+        self.assertEqual(features._hanging_material(chess.Board()), 0)
+
+    def test_an_undefended_attacked_piece_is_loose(self):
+        # Knight on g1 attacked down the file by the rook, defended by nobody.
+        board = chess.Board("4k1r1/8/8/8/8/8/8/4K1N1 w - - 0 1")
+        self.assertEqual(features._hanging_material(board), 3)
+
+    def test_a_cheaper_attacker_makes_a_defended_piece_loose(self):
+        # Rook on d5 attacked by the c6 pawn and defended by the d1 rook: still
+        # loose, because the pawn is worth less than what it attacks.
+        board = chess.Board("4k3/8/2p5/3R4/8/8/8/3RK3 w - - 0 1")
+        self.assertEqual(features._hanging_material(board), 5)
+
+    def test_a_king_attacker_is_never_the_cheap_one(self):
+        # Queen attacked only by the enemy king and defended once: a king can
+        # capture but can never be traded, so it is not the cheap attacker.
+        board = chess.Board("8/8/3k4/3Q4/8/8/8/3RK3 b - - 0 1")
+        self.assertEqual(features._hanging_material(board), 0)
+
+    def test_it_reaches_tension(self):
+        frames, baseline = tracked(sans=shuffle_moves(10))
+        loose = copy.deepcopy(frames)
+        for frame in loose:
+            frame["hanging_material"] = tension.HANGING_FULL
+        raised = tension.tension_track(loose)["plies"]
+        self.assertGreater(max(e["tension"] for e in raised),
+                           max(e["tension"] for e in baseline))
+
+    def test_hanging_full_is_pinned(self):
+        self.assertEqual(tension.HANGING_FULL, 12)
+        self.assertEqual(tension._hanging({"hanging_material": 12}), 1.0)
+        self.assertEqual(tension._hanging({"hanging_material": 6}), 0.5)
 
 
 class DensityAndMeter(unittest.TestCase):
@@ -473,7 +605,7 @@ class DensityAndMeter(unittest.TestCase):
         frames, _ = tracked(sans=shuffle_moves(6))
         for frame in frames[2:5]:
             frame["is_check"] = True
-        track = tension.tension_track(frames)
+        track = tension.tension_track(frames)["plies"]
         self.assertEqual(track[2]["meter"], "free")
         self.assertEqual(track[3]["meter"], "dotted")
         self.assertEqual(track[4]["meter"], "dotted")
@@ -488,23 +620,51 @@ class DensityAndMeter(unittest.TestCase):
         cramped = copy.deepcopy(frames)
         for frame in cramped:
             frame["mobility_w"] = frame["mobility_b"] = 2
-        changed = tension.tension_track(cramped)
+        changed = tension.tension_track(cramped)["plies"]
         self.assertLess(changed[0]["density"], baseline[0]["density"])
 
 
 class ActiveLayers(unittest.TestCase):
-    def test_records_what_was_available(self):
-        _, bare = tracked(sans=shuffle_moves(6))
-        self.assertEqual(bare[0]["active_layers"], ["board"])
-        _, rich = tracked(
+    def test_is_a_per_game_manifest_not_a_per_ply_flag(self):
+        """One answer per game, for the badge. Saying it per ply made the layer
+        appear to switch on and off whenever a single reply was a premove."""
+        bare = record(sans=shuffle_moves(6))
+        self.assertEqual(bare["active_layers"], ["board"])
+        self.assertNotIn("active_layers", bare["plies"][0])
+
+        rich = record(
             sans=shuffle_moves(6),
             clocks=clocks_from_think([0, 0] + [1.0] * 4, start=600),
             time_control="600",
             evals=["0.1"] * 6,
         )
-        self.assertIn("eval", rich[-1]["active_layers"])
-        self.assertIn("pressure", rich[-1]["active_layers"])
-        self.assertIn("think", rich[-1]["active_layers"])
+        self.assertEqual(rich["active_layers"],
+                         ["board", "eval", "pressure", "think"])
+
+    def test_a_single_premove_does_not_drop_the_think_layer(self):
+        think = [0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0]
+        whole = record(sans=shuffle_moves(8),
+                       clocks=clocks_from_think(think, start=600),
+                       time_control="600")
+        self.assertIn("think", whole["active_layers"])
+
+    def test_a_signal_appearing_late_still_counts(self):
+        """The manifest asks whether the game carried a signal at all.
+
+        Reading it off the first ply would miss annotations that start later,
+        and would miss the think layer in every game, since the opening ply of
+        each colour has no baseline to measure a think time against.
+        """
+        whole = record(sans=shuffle_moves(8),
+                       evals=[None, None, None, "0.4", "0.1", "0.3", "0.2", "0.5"])
+        self.assertIn("eval", whole["active_layers"])
+
+    def test_game_tempo_scale_is_recorded_once(self):
+        whole = record(sans=shuffle_moves(6),
+                       clocks=clocks_from_think([0, 0] + [2.0] * 4, start=600),
+                       time_control="600")
+        self.assertEqual(whole["game_tempo_scale"], 2.0)
+        self.assertNotIn("game_tempo_scale", whole["plies"][0])
 
 
 if __name__ == "__main__":
