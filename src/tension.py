@@ -1,10 +1,16 @@
 """Stateful reading of how a game is going, as a per-ply state track.
 
-Phase 3. Tension is a scalar in [0, 1] carried across plies, accumulating from
-locked and mutually-attacking pawns, king pressure, a stalling fifty-move counter
-or repeated position, and (where present) evaluation volatility. It releases only
-on genuine board events -- a pawn break, material simplification, a king reaching
-shelter, a pawn move or capture resetting the grind, or the end of the game.
+Three axes, kept independent because they answer different questions. Tension is
+a property of the position: how locked the pawns are, how much heat is on the
+kings, how violently the evaluation is swinging, how long nothing irreversible
+has happened. Pressure is a property of the players, and passes straight through
+from the clock. Density is how much is going on. A dead-drawn endgame in a time
+scramble is low tension and high pressure; a sharp attack with both players at an
+hour is the reverse, and both have to be representable.
+
+Tension is carried across plies rather than recomputed at each one, and it comes
+down only when something on the board brings it down. There is no timer and no
+schedule: sustained tension that refuses to resolve is the whole point.
 
 This module emits *state*, not sound. It has no opinion on pitch, scale, timbre
 or register, imports nothing audio-related, and does not know that music is the
@@ -14,22 +20,271 @@ Mapping state onto sound belongs to `render`.
 Mobility is deliberately absent from tension: measured over a locked King's
 Indian against an open gambit it separates them by only 8.5%, because a closed
 centre pushes play to the wings without reducing the legal move count. It feeds
-density instead. Time pressure is likewise carried through as its own axis --
-tension is a property of the position, pressure a property of the players.
+density instead.
 """
 
 from __future__ import annotations
+
+from collections import deque
+
+# Normalisers, taken from the observed range across the fixture set rather than
+# invented: a value at or beyond these reads as the full measure of that term.
+LOCKED_FULL = 6
+PAWN_TENSION_FULL = 3
+KING_PRESSURE_FULL = 8
+MOBILITY_FULL = 80
+EVAL_VOLATILITY_FULL = 150.0
+EVAL_WINDOW = 4
+
+# The fifty-move rule is claimable at 100 halfmoves, but a grind is audible long
+# before it: by 50 the players are already handling the position as one where
+# nothing is happening. Saturating here rather than at the rule keeps the term
+# expressive over the range games actually reach.
+STALL_SATURATION = 50
+
+# A counter at 45 is not twice a counter at 22. Squaring pushes the weight into
+# the upper range, where a draw claim is in reach and the next irreversible move
+# carries real stakes.
+STALL_EXPONENT = 2.0
+
+# A repeated position says both players are testing whether the other deviates.
+# Four occurrences in game six and no threefold: a modifier on the stall term,
+# not a subsystem of its own.
+REPETITION_BOOST = 1.25
+
+# Fraction of the way tension moves toward its current drive each ply. Slow
+# enough that a single quiet ply does not erase a build.
+ATTACK = 0.12
+
+STRUCTURE_LOCKED_SHARE = 0.65
+
+WEIGHTS = {
+    "structure": 0.34,
+    "king": 0.22,
+    "stall": 0.28,
+    "eval": 0.16,
+}
+
+# How much of the accumulated tension each kind of event discharges.
+RELEASE_DEPTH = {
+    "pawn_break": 0.55,
+    "progress_reset": 0.45,
+    "simplification": 0.60,
+    "king_safety": 0.40,
+    "termination": 1.0,
+}
+
+PAWN_BREAK_DROP = 2
+SIMPLIFICATION_POINTS = 5
+DENSITY_MOBILITY_SHARE = 0.55
+FORCING_STREAK_FULL = 3
+DOTTED_STREAK = 2
+
+
+def _clamp(value: float) -> float:
+    return 0.0 if value < 0.0 else 1.0 if value > 1.0 else value
+
+
+def _structure(frame: dict) -> float:
+    locked = _clamp(frame["locked_pawns"] / LOCKED_FULL)
+    contact = _clamp(frame["pawn_tension"] / PAWN_TENSION_FULL)
+    return STRUCTURE_LOCKED_SHARE * locked + (1 - STRUCTURE_LOCKED_SHARE) * contact
+
+
+def _king(frame: dict) -> float:
+    """Heat on either king. Whose it is does not matter -- a king under attack
+    is tension regardless of who stands better."""
+    worst = max(frame["king_pressure_w"], frame["king_pressure_b"])
+    return _clamp(worst / KING_PRESSURE_FULL)
+
+
+def _stall(frame: dict) -> float:
+    raw = _clamp(frame["halfmove_clock"] / STALL_SATURATION) ** STALL_EXPONENT
+    if frame["repetition_2"]:
+        raw *= REPETITION_BOOST
+    return _clamp(raw)
+
+
+def _density(frame: dict, forcing_streak: int) -> float:
+    mobility = _clamp((frame["mobility_w"] + frame["mobility_b"]) / MOBILITY_FULL)
+    forcing = _clamp(forcing_streak / FORCING_STREAK_FULL)
+    return _clamp(
+        DENSITY_MOBILITY_SHARE * mobility + (1 - DENSITY_MOBILITY_SHARE) * forcing
+    )
+
+
+def _is_forcing(frame: dict) -> bool:
+    return bool(frame["is_check"] or frame["is_capture"] or frame["forced"])
+
+
+def _release_events(frame: dict, previous: dict | None, history: list[dict],
+                    is_last: bool) -> list[str]:
+    """Which release events, if any, this ply constitutes."""
+    events: list[str] = []
+
+    if previous is not None:
+        if previous["locked_pawns"] - frame["locked_pawns"] >= PAWN_BREAK_DROP:
+            events.append("pawn_break")
+        if frame["halfmove_clock"] == 0 and previous["halfmove_clock"] > 0:
+            events.append("progress_reset")
+
+        queens_before = "Q" in previous["fen_after"] or "q" in previous["fen_after"]
+        queens_now = "Q" in frame["fen_after"] or "q" in frame["fen_after"]
+        two_back = history[-2] if len(history) >= 2 else previous
+        swing = abs(two_back["material_balance"] - frame["material_balance"])
+        traded = queens_before and not queens_now
+        if traded or swing >= SIMPLIFICATION_POINTS:
+            events.append("simplification")
+
+        castled = frame["san"].startswith("O-O")
+        mover_pressure = f"king_pressure_{frame['color']}"
+        sheltered = frame[mover_pressure] < previous[mover_pressure]
+        if castled or (sheltered and previous[mover_pressure] > 0):
+            events.append("king_safety")
+
+    if is_last:
+        events.append("termination")
+    return events
+
+
+def _active_layers(frame: dict) -> list[str]:
+    layers = ["board"]
+    if frame["eval_cp"] is not None:
+        layers.append("eval")
+    if frame["time_pressure_w"] is not None or frame["time_pressure_b"] is not None:
+        layers.append("pressure")
+    if frame["think_relative"] is not None:
+        layers.append("think")
+    return layers
 
 
 def tension_track(frames: list[dict]) -> list[dict]:
     """Single stateful pass over frames, emitting per-ply state.
 
     Each entry carries `tension`, `pressure_w`, `pressure_b`, `density`, `meter`,
-    `cadence_strength`, `stall` and `active_layers`.
+    `cadence_strength`, `stall`, `active_layers` and `game_tempo_scale`.
     """
-    raise NotImplementedError("Phase 3")
+    track: list[dict] = []
+    if not frames:
+        return track
+
+    tension = 0.0
+    forcing_streak = 0
+    evals: deque[int] = deque(maxlen=EVAL_WINDOW + 1)
+    history: list[dict] = []
+    last_index = len(frames) - 1
+
+    for index, frame in enumerate(frames):
+        previous = history[-1] if history else None
+
+        terms = {
+            "structure": _structure(frame),
+            "king": _king(frame),
+            "stall": _stall(frame),
+        }
+        if frame["eval_cp"] is not None:
+            evals.append(frame["eval_cp"])
+            if len(evals) >= 2:
+                swings = [abs(b - a) for a, b in zip(evals, list(evals)[1:])]
+                terms["eval"] = _clamp(
+                    (sum(swings) / len(swings)) / EVAL_VOLATILITY_FULL
+                )
+
+        # Absent terms drop out and the rest renormalise, so a game with no
+        # evaluations is read on the same scale as one with them.
+        total = sum(WEIGHTS[name] for name in terms)
+        drive = sum(WEIGHTS[name] * value for name, value in terms.items()) / total
+
+        tension += ATTACK * (drive - tension)
+
+        events = _release_events(frame, previous, history, index == last_index)
+        cadence_strength = 0.0
+        if events:
+            depth = max(RELEASE_DEPTH[event] for event in events)
+            cadence_strength = _clamp(tension * depth)
+            tension = _clamp(tension - cadence_strength)
+
+        forcing_streak = forcing_streak + 1 if _is_forcing(frame) else 0
+
+        track.append(
+            {
+                "ply": frame["ply"],
+                "tension": round(_clamp(tension), 4),
+                "pressure_w": frame["time_pressure_w"],
+                "pressure_b": frame["time_pressure_b"],
+                "density": round(_density(frame, forcing_streak), 4),
+                "meter": "dotted" if forcing_streak >= DOTTED_STREAK else "free",
+                "cadence_strength": round(cadence_strength, 4),
+                "stall": round(terms["stall"], 4),
+                "active_layers": _active_layers(frame),
+                "game_tempo_scale": frame["game_tempo_scale"],
+            }
+        )
+        history.append(frame)
+
+    return track
 
 
 def plot_track(track: list[dict], out_path) -> None:
-    """Plot the tension track and save it."""
-    raise NotImplementedError("Phase 3")
+    """Plot the state track and save it."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    surface, ink, ink2, grid = "#fcfcfb", "#0b0b0b", "#52514e", "#e2e1dd"
+    series = ("#2a78d6", "#eb6834", "#1baf7a")
+    moves = [(entry["ply"] + 1) / 2 for entry in track]
+
+    figure, axes = plt.subplots(3, 1, figsize=(12, 7.5), sharex=True,
+                                gridspec_kw={"hspace": 0.2})
+    figure.patch.set_facecolor(surface)
+
+    axes[0].plot(moves, [e["tension"] for e in track], color=series[0], lw=1.8)
+    cadences = [(m, e) for m, e in zip(moves, track) if e["cadence_strength"] > 0]
+    if cadences:
+        axes[0].scatter(
+            [m for m, _ in cadences],
+            [e["tension"] for _, e in cadences],
+            s=[12 + 340 * e["cadence_strength"] for _, e in cadences],
+            facecolor="none", edgecolor=series[1], lw=1.3, zorder=3,
+        )
+    axes[0].set_ylabel("tension", fontsize=9.5, color=ink2)
+    axes[0].set_ylim(-0.03, 1.03)
+
+    for side, colour, label in (("w", series[0], "White"), ("b", series[1], "Black")):
+        points = [(m, e[f"pressure_{side}"]) for m, e in zip(moves, track)
+                  if e[f"pressure_{side}"] is not None]
+        if points:
+            axes[1].plot([m for m, _ in points], [v for _, v in points],
+                         color=colour, lw=1.5, label=label)
+    if any(e["pressure_w"] is not None for e in track):
+        axes[1].legend(frameon=False, fontsize=9, labelcolor=ink2, loc="upper left")
+    else:
+        axes[1].annotate("no clock data — pressure layer off", xy=(0.015, 0.5),
+                         xycoords="axes fraction", fontsize=9, color=ink2)
+    axes[1].set_ylabel("pressure", fontsize=9.5, color=ink2)
+    axes[1].set_ylim(-0.03, 1.03)
+
+    axes[2].plot(moves, [e["density"] for e in track], color=series[2], lw=1.5)
+    dotted = [m for m, e in zip(moves, track) if e["meter"] == "dotted"]
+    for move in dotted:
+        axes[2].axvline(move, color=ink2, lw=0.6, alpha=0.18)
+    axes[2].set_ylabel("density", fontsize=9.5, color=ink2)
+    axes[2].set_ylim(-0.03, 1.03)
+    axes[2].set_xlabel("Move number", fontsize=9.5, color=ink2)
+
+    for axis in axes:
+        axis.set_facecolor(surface)
+        axis.grid(True, color=grid, lw=0.8)
+        axis.set_axisbelow(True)
+        for spine in ("top", "right"):
+            axis.spines[spine].set_visible(False)
+        for spine in ("left", "bottom"):
+            axis.spines[spine].set_color(grid)
+        axis.tick_params(colors=ink2, labelsize=9)
+
+    axes[0].set_title(str(out_path).rsplit("/", 1)[-1].replace("_tension.png", ""),
+                      fontsize=12, color=ink, loc="left", pad=10)
+    figure.savefig(out_path, dpi=140, facecolor=surface, bbox_inches="tight")
+    plt.close(figure)
