@@ -309,10 +309,46 @@ class Cymbal(unittest.TestCase):
         self.assertGreater(min(b / a for a, b in zip(levels, levels[1:])), 1.05)
 
     def test_a_bigger_capture_has_more_body_lower_down(self):
-        """A crash has weight a shimmer has not, so the band opens downward."""
+        """A crash has weight a shimmer has not, so the band opens downward.
+
+        Measured as the share of energy below 3 kHz, not as a centroid: with the
+        band's lower edge held fixed instead of following the value, the two
+        centroids come out within a percent of each other and which one is
+        larger is down to the noise draw. The share separates them 83-fold.
+        """
         rng = generator()
-        self.assertLess(centroid(mono(render.cymbal(9, "w", rng))),
-                        centroid(mono(render.cymbal(1, "w", rng))))
+
+        def body(samples):
+            freqs, power = spectrum(samples)
+            return float(power[freqs < 3000.0].sum() / power.sum())
+
+        pawn = mono(render.cymbal(1, "w", rng))
+        queen = mono(render.cymbal(9, "w", rng))
+        self.assertLess(centroid(queen), centroid(pawn))
+        self.assertGreater(body(queen), body(pawn) * 20)
+
+    def test_the_cymbal_takes_its_size_from_the_frame(self):
+        """The renderer must read `captured_value`, not merely own a scale.
+
+        Striking every capture at queen size passes every other test in this
+        class, because they all call `cymbal` with a value of their own choosing.
+        """
+        rng = generator()
+        pawn = render._capture_blocks({"captured_value": 1, "color": "w"}, 0, rng)
+        queen = render._capture_blocks({"captured_value": 9, "color": "w"}, 0, rng)
+        self.assertEqual(len(pawn), 1)
+        self.assertEqual(len(queen), 1)
+        self.assertGreater(len(queen[0][1]), 4 * len(pawn[0][1]))
+
+    def test_a_quiet_move_rings_nothing(self):
+        rng = generator()
+        self.assertEqual(
+            render._capture_blocks({"captured_value": 0, "color": "w"}, 0, rng), [])
+
+    def test_a_capture_lands_on_the_ply_that_made_it(self):
+        rng = generator()
+        blocks = render._capture_blocks({"captured_value": 5, "color": "b"}, 7777, rng)
+        self.assertEqual(blocks[0][0], 7777)
 
     def test_colour_does_not_reorder_the_values(self):
         """The colour cue is deliberately the smaller of the two effects.
@@ -465,6 +501,20 @@ class Timpani(unittest.TestCase):
                 self.assertGreater(attack, 1e-3)
                 self.assertLess(tail, 1e-4)
                 self.assertGreater(attack, tail * 1000)
+
+    def test_the_drum_darkens_as_it_rings(self):
+        """Higher modes die faster than the principal, as on a real membrane.
+
+        Measured past the stick and inside the membrane's own band, so it is the
+        per-mode decays being pinned and not the transient. Giving every mode the
+        same decay holds the mode balance constant for the whole stroke and
+        passes every other assertion here.
+        """
+        rng = generator()
+        stroke = render.timpani(render.TIMPANI_MIDI, rng)
+        early = stroke[int(0.03 * render.SAMPLE_RATE):int(0.13 * render.SAMPLE_RATE)]
+        late = stroke[-int(0.30 * render.SAMPLE_RATE):]
+        self.assertGreater(centroid(early) / centroid(late), 1.10)
 
     def test_the_stroke_starts_and_ends_at_silence(self):
         rng = generator()
