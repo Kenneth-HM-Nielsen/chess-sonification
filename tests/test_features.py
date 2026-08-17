@@ -543,7 +543,23 @@ class SyntheticFixtures(unittest.TestCase):
                            time_control="900+30")
         pressures = {f["time_pressure_w"] for f in frames
                      if f["time_pressure_w"] is not None}
-        self.assertEqual(len(pressures), 1)
+        # 900/40 + 30 = 52.5 opening pace; 300/40 + 30 = 37.5 held.
+        self.assertEqual(pressures, {round(1 - 37.5 / 52.5, 4)})
+
+    def test_an_open_ended_period_that_is_not_last_still_reads_memoryless(self):
+        """The increment in force is the period's, not the final entry's.
+
+        '900+30:40/7200' is open-ended from move one, so the game never leaves
+        the first period. Reading the increment off the last period would see
+        zero and start counting down.
+        """
+        periods = ingest.parse_time_control("900+30:40/7200")
+        horizons = {features.moves_to_threshold(periods, m) for m in range(1, 90)}
+        self.assertEqual(horizons, {features.NOMINAL_HORIZON})
+
+    def test_empty_periods_do_not_raise(self):
+        self.assertEqual(features.moves_to_threshold([], 5),
+                         features.NOMINAL_HORIZON)
 
     def test_horizon_floors_at_a_literal_ten(self):
         """Asserted against a literal, not against the constant.
@@ -563,7 +579,6 @@ class SyntheticFixtures(unittest.TestCase):
         self.assertEqual(features.moves_to_threshold(SUDDEN, 29), 11)
         self.assertEqual(features.moves_to_threshold(SUDDEN, 30), 10)
         self.assertEqual(features.moves_to_threshold(SUDDEN, 31), 10)
-        # In a later period the same countdown restarts from the period's end.
         # A later period counts down only when it has no increment.
         no_inc = ingest.parse_time_control("40/7200:20/3600:900")
         self.assertEqual(features.moves_to_threshold(no_inc, 89), 11)

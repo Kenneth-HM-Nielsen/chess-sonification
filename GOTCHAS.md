@@ -13,12 +13,12 @@ that depends on it separately.
 The horizon floor is the divisor of a per-move budget. The test read:
 
 ```python
-self.assertGreaterEqual(features.moves_to_threshold(periods, move),
+self.assertGreaterEqual(features.moves_to_threshold([], move),
                         features.MIN_HORIZON)     # asserts nothing
 ```
 
 Setting `MIN_HORIZON = 0` passed the entire suite and then raised
-`ZeroDivisionError` on a real game. The fix is to assert the value and its
+`ZeroDivisionError` on three real games. The fix is to assert the value and its
 consequences:
 
 ```python
@@ -57,9 +57,12 @@ measurement needs, and check the resolution before concluding a feature is weak.
 
 Formatting `599.95` by taking `divmod` first and rounding the seconds field last
 yields `0:09:60.0`, which is not a valid clock and which python-chess reads back
-as `600`. Round into integer units first, then decompose. This lived in a test
-helper and silently destroyed every sub-second think time the tests were meant to
-exercise, so the premove floor was never actually tested.
+as `600`. Round into integer units first, then decompose.
+
+This lived in a test helper. It degraded every sub-second value to a tenth, and
+where the rounding crossed a minute boundary it lost the difference entirely —
+which is exactly what happened to the fixture then in use, so the premove floor
+was never actually exercised by the test written for it.
 
 ## Mobility barely notices whether a position is closed
 

@@ -19,6 +19,7 @@ from collections import deque
 import chess
 
 from .ingest import (
+    Period,
     increment_for_move,
     move_number_for_ply,
     parse_time_control,
@@ -44,9 +45,10 @@ CENTRE_SQUARES = (chess.D4, chess.D5, chess.E4, chess.E5)
 # classical comparable without flattening them.
 NOMINAL_HORIZON = 40
 
-# Floor for the counting-down horizon, which is only ever used in an open-ended
-# period with no increment. It takes over NOMINAL_HORIZON - MIN_HORIZON moves in
-# -- move 30 of a sudden-death game, not move 40 -- and from there pressure
+# Floor for the counting-down horizon, used where no increment sets a sustainable
+# pace -- an open-ended period without one, or the run-on past a control that the
+# rules do not extend. It takes over NOMINAL_HORIZON - MIN_HORIZON moves in, so
+# move 30 of a sudden-death game rather than move 40, and from there pressure
 # becomes a function of the absolute clock, because no defined pace remains to
 # measure against. Must stay above zero: it is the divisor of the budget.
 MIN_HORIZON = 10
@@ -192,7 +194,7 @@ def move_features(board_before: chess.Board, move: chess.Move) -> dict:
     }
 
 
-def moves_to_threshold(periods: list, move_number: int) -> int:
+def moves_to_threshold(periods: list[Period], move_number: int) -> int:
     """Moves this side must still make after completing `move_number`.
 
     A clock reading is taken after its move, so the horizon paired with it counts
@@ -210,12 +212,16 @@ def moves_to_threshold(periods: list, move_number: int) -> int:
     pressure fall on a flat clock, which is the move-number dependence this whole
     horizon exists to avoid.
     """
+    if not periods:
+        return NOMINAL_HORIZON
     bounds = period_bounds(periods)
     for bound in bounds:
         if bound > move_number:
             return bound - move_number
 
-    if periods[-1][2] > 0:
+    # Asked of the period the move leaves the game in, by the same reckoning the
+    # budget uses for its increment -- one definition of what is in force, not two.
+    if increment_for_move(periods, move_number + 1) > 0:
         # NOMINAL_HORIZON here is a prior on game length, not a rule.
         return NOMINAL_HORIZON
     period_start = bounds[-1] if bounds else 0
@@ -227,6 +233,7 @@ def initial_budget(periods: list) -> float | None:
     moves, base, increment = periods[0]
     if base is None:
         return None
+    # Where the rules bound nothing, the nominal stands in as a prior on length.
     divisor = moves if moves is not None else NOMINAL_HORIZON
     return base / max(1, divisor) + increment
 
