@@ -108,3 +108,46 @@ directly.
 
 The related habit: when a mutation survives, the finding is usually not "add a
 test" but "the test you have never runs that line".
+
+## Restore a mutation from a copy, never from git
+
+A mutation run is edit, test, revert, and the obvious revert is
+`git checkout -- src/thing.py`. It also destroys every uncommitted change in that
+file, which on a mutation run is the work being tested. Copy the file first and
+copy it back.
+
+This happened three times in one session, and the second failure was worse than
+the first: the run had already reverted the file, so every later mutation applied
+to the *committed* version, matched nothing, and was reported killed when it had
+never been applied. A mutation run that silently stops mutating reads exactly
+like a mutation run where everything is pinned. Have the harness compare the file
+against the pristine copy and print NO-MATCH when a mutation did not apply.
+
+Commit before mutating, and the whole class goes away.
+
+## A test over synthesised noise can measure the draw and not the mapping
+
+Anything built from noise -- a cymbal, a Karplus-Strong pluck, a reverb impulse
+-- gives statistics that move with the random draw. Two failures, opposite in
+shape, both from B1:
+
+**The statistic does not move at all.** Raggedness was measured as the fraction
+of rising steps in an envelope follower over the decay. Bandpassed noise already
+fluctuates, so that fraction is 0.49495 whether the wander is at full depth or
+deleted outright -- identical to five figures, against a floor of 0.05. The
+mapping could be removed and the test named after it stayed green. Detrend against
+the shape the signal is *supposed* to have and measure what is left: the spread of
+the log-envelope after taking the exponential out is 0.07-0.11 with the wander and
+0.027-0.032 without it.
+
+**The statistic moves far too much.** The attack was asserted as `argmax` of the
+envelope being under 25 ms. Over 200 draws that lands anywhere from 5 ms to
+320 ms, and breaks the bound on 31 of them; it was green only because the seed
+and the draw order happened to put it at 12 ms. Worse, it was the only assertion
+killing two unrelated mutations, so fixing it properly would have released them.
+
+Before trusting an assertion about noise, run it over twenty seeds and look at the
+range, and run it against the mutation it exists to catch. If the two ranges
+overlap, the assertion is decoration. Prefer aggregates -- energy, rms, a
+smoothed envelope peak, a band's share of the spectrum -- over anything derived
+from a single sample or a single extremum.
